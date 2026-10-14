@@ -1,13 +1,19 @@
 import { execFile } from "node:child_process"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { ShellCreateBefore } from "@opencode/plugin/promise/shell"
 
 type Environment = Record<string, string | undefined>
 
 // Environment resolution may execute hooks in already trusted mise config.
-function capture(file: string, args: string[], cwd: string, env: Environment, input?: string): Promise<string | undefined> {
+function capture(file: string, args: string[], cwd: string, env: Environment, input?: string, fallback?: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     const child = execFile(file, args, { cwd, env, timeout: 2000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+      if (error && "code" in error && error.code === "ENOENT" && fallback) {
+        resolve(capture(fallback, args, cwd, env, input))
+        return
+      }
       resolve(error ? undefined : stdout)
     })
     child.stdin?.on("error", () => {})
@@ -56,7 +62,8 @@ export async function augment(event: ShellCreateBefore): Promise<void> {
   // snip's parser is POSIX-oriented. Only unambiguous bare native commands are
   // eligible in PowerShell; expressions, quoting and control flow stay intact.
   if (kind === "powershell" && !/^[A-Za-z][A-Za-z0-9_.-]*(?: +[A-Za-z0-9_./:=,@%+-]+)* *$/.test(event.command)) return
-  const output = await capture("snip", ["hook"], event.cwd, event.env, JSON.stringify({ tool_name: "Bash", tool_input: { command: event.command } }))
+  // Desktop-started servers may omit ~/bin from PATH; try it only when snip is not found.
+  const output = await capture("snip", ["hook"], event.cwd, event.env, JSON.stringify({ tool_name: "Bash", tool_input: { command: event.command } }), join(homedir(), "bin", process.platform === "win32" ? "snip.exe" : "snip"))
   if (!output) return
   try {
     const command: unknown = JSON.parse(output).hookSpecificOutput?.updatedInput?.command
