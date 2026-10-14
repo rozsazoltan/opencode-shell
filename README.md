@@ -21,9 +21,9 @@ Bash, Zsh and POSIX shells use snip's conservative rewrite engine. PowerShell su
 
 ## Releases
 
-The first version is `0.1.0`. After merging it into `master`, the maintainer publishes it **locally** with `npm ci` and `npm publish --access public`, then tags that exact commit with `git tag v0.1.0`, pushes it with `git push origin v0.1.0`, and creates its GitHub Release with `gh release create v0.1.0 --verify-tag --generate-notes`. Do not run the automated release before this bootstrap is complete.
+First release (`0.1.0`): merge into `master`, run `npm ci && npm publish --access public` **locally**, then tag that commit (`git tag v0.1.0 && git push origin v0.1.0`) and create its GitHub Release (`gh release create v0.1.0 --verify-tag --generate-notes`).
 
-After the package exists on npm, configure its npm trusted publisher for GitHub Actions repository `rozsazoltan/opencode-shell`, workflow filename `release.yml`, and allow direct `npm publish`. Enable Actions **Contents and Actions write** permissions and allow the workflow to push to `master` under any branch protection rules. No npm token is needed. Run `.github/workflows/release.yml` manually on `master`, choosing `patch`, `minor`, or `major`; leave the internal `resume` checkbox unchecked. The first run checks and packs the package, then pushes the version commit and tag; it dispatches a second run on that commit to publish with OIDC provenance and create the GitHub Release. Confirm the second run completes. If dispatch or publication fails, manually rerun the workflow: it repairs the unpublished tag or missing Release without applying another bump. Duplicate internal dispatches safely do nothing once the release is complete. If an unpublished tagged commit is no longer the branch tip, reconcile it manually. `GITHUB_TOKEN` pushes do not trigger workflows, but its `workflow_dispatch` request does.
+For later releases, configure npm trusted publishing for `rozsazoltan/opencode-shell` and workflow `release.yml`; grant Actions **Contents and Actions write** permissions and allow pushes to `master`. Manually run the workflow on `master` with `patch`, `minor`, or `major` (leave `resume` unchecked). It tags the version, then starts a second run to publish via OIDC and create the GitHub Release. Check both runs; rerun manually if interrupted.
 
 ## Development checks
 
