@@ -1,5 +1,5 @@
 {
-  "name": "opencode-shell",
+  "name": "@rozsazoltan/opencode-shell",
   "version": "0.1.0",
   "description": "Native OpenCode V2 shell environments with mise and optional snip filtering",
   "type": "module",
@@ -21,6 +21,10 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "shell",
+    "opencode-shell",
+    "mise",
+    "mise-en-place",
     "snip",
     "llm",
     "tokens",
