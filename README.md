@@ -36,7 +36,7 @@ npm test
 npm pack --dry-run
 ```
 
-For a local OpenCode check, set `"plugins": ["/absolute/path/opencode-shell/src"]` in a test project's `opencode.jsonc` (use the server-visible Linux path for WSL). In a trusted mise project, add `OPENCODE_SHELL_SMOKE = "one"` under `[env]` and ask the agent to run `printenv OPENCODE_SHELL_SMOKE` with the native shell tool (PowerShell: `$env:OPENCODE_SHELL_SMOKE`). With snip installed, run `git log -30` the same way and check for a `snip run --` wrapper and filtered output.
+For a local OpenCode check, set `"plugins": ["/absolute/path/opencode-shell/src"]` in a test project's `opencode.jsonc`. In a trusted mise project, add `OPENCODE_SHELL_SMOKE = "one"` under `[env]` and ask the agent to run `printenv OPENCODE_SHELL_SMOKE` with the native shell tool (PowerShell: `$env:OPENCODE_SHELL_SMOKE`). With snip installed, run `git log -30` the same way and check for a `snip run --` wrapper and filtered output.
 
 ## License and acknowledgements
 
