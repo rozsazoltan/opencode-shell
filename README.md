@@ -21,9 +21,7 @@ Bash, Zsh and POSIX shells use snip's conservative rewrite engine. PowerShell su
 
 ## Releases
 
-First release (`0.1.0`): merge into `master`, run `npm ci && npm publish --access public` **locally**, then tag that commit (`git tag v0.1.0 && git push origin v0.1.0`) and create its GitHub Release (`gh release create v0.1.0 --verify-tag --generate-notes`).
-
-For later releases, configure npm trusted publishing for `rozsazoltan/opencode-shell` and workflow `release.yml`; grant Actions **Contents and Actions write** permissions and allow pushes to `master`. Manually run the workflow on `master` with `patch`, `minor`, or `major` (leave `resume` unchecked). It tags the version, then starts a second run to publish via OIDC and create the GitHub Release. Check both runs; rerun manually if interrupted.
+Releases follow SemVer (`vX.Y.Z`). The maintainer selects a patch, minor, or major update; the release workflow checks the package, tags the version, publishes it to npm with provenance, and creates a GitHub Release.
 
 ## Development checks
 
