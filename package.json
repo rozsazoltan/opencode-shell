@@ -27,10 +27,10 @@
     "cli"
   ],
   "license": "AGPL-3.0-or-later",
-  "homepage": "https://github.com/rozsazoltan/opencode-snip",
+  "homepage": "https://github.com/rozsazoltan/opencode-shell",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rozsazoltan/opencode-snip"
+    "url": "https://github.com/rozsazoltan/opencode-shell"
   },
   "engines": {
     "node": "^24"
