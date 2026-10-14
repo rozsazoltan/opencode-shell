@@ -57,4 +57,4 @@ Unit tests mock external processes; also verify behavior in OpenCode:
 
 AGPL-3.0-or-later: this work is licensed under the GNU Affero General Public License, version 3 or any later version. See [LICENSE](LICENSE).
 
-Thanks to [jdx/mise](https://github.com/jdx/mise) and [edouard-claude/snip](https://github.com/edouard-claude/snip).
+Thanks to [VincentHardouin/opencode-snip](https://github.com/VincentHardouin/opencode-snip), [jdx/mise](https://github.com/jdx/mise), and [edouard-claude/snip](https://github.com/edouard-claude/snip).
