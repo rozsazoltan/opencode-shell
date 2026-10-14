@@ -19,9 +19,9 @@ Automatic `snip run` wrapping uses the native V2 `shell.create.before` hook. Ope
 
 Bash, Zsh and POSIX shells use snip's conservative rewrite engine. PowerShell supports only simple bare commands, with the required `&` operator for quoted executable paths. Unsupported shell dialects remain unchanged. Pipes, redirections and complex PowerShell expressions are not forcibly wrapped.
 
-## Releases
+## Versions
 
-Releases follow SemVer (`vX.Y.Z`). The maintainer selects a patch, minor, or major update; the release workflow checks the package, tags the version, publishes it to npm with provenance, and creates a GitHub Release.
+Find published versions on [npm](https://www.npmjs.com/package/@rozsazoltan/opencode-shell) and changes in [GitHub Releases](https://github.com/rozsazoltan/opencode-shell/releases). Versions follow SemVer.
 
 ## Development checks
 
