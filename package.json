@@ -1,0 +1,46 @@
+{
+  "name": "@rozsazoltan/opencode-shell",
+  "version": "0.1.0",
+  "description": "Native OpenCode V2 shell environments with mise and optional snip filtering",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.21"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "shell",
+    "opencode-shell",
+    "mise",
+    "mise-en-place",
+    "snip",
+    "llm",
+    "tokens",
+    "cli"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/rozsazoltan/opencode-shell",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rozsazoltan/opencode-shell"
+  },
+  "engines": {
+    "node": "^24"
+  },
+  "files": [
+    "src/index.ts",
+    "THIRD_PARTY_NOTICES"
+  ]
+}
