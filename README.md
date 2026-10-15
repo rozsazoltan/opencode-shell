@@ -32,6 +32,10 @@ Mise and RTK work independently: without mise the existing environment is kept; 
 
 Find published versions on [npm](https://www.npmjs.com/package/@rozsazoltan/opencode-shell) and changes in [GitHub Releases](https://github.com/rozsazoltan/opencode-shell/releases). Versions follow SemVer.
 
+## Releases
+
+The release workflow stages each tagged version on npm for human approval; it does not publish directly. After the workflow succeeds, approve the staged version at [npm staged packages](https://www.npmjs.com/settings/rozsazoltan/staged-packages), then rerun the release workflow on `master`. Once npm reports the version as published, that rerun creates the GitHub Release instead of starting another version bump. If a workflow retry occurs before approval, it will fail safely because the staged version already reserves that version; approve the existing stage and rerun rather than creating or deleting another stage.
+
 ## Contributing
 
 Use Node 24 and npm to install dependencies and run the existing checks:

@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: Version bump for a new release (ignored when repairing an incomplete release)
+        description: Version bump for a new release (ignored when staging or repairing an existing tag)
         required: true
         type: choice
         options: [patch, minor, major]
       resume:
-        description: Internal publish dispatch; leave unchecked for manual releases
+        description: Internal release dispatch; leave unchecked for manual releases
         type: boolean
         default: false
 
@@ -39,7 +39,7 @@ jobs:
           package-manager-cache: false
 
       - name: Use npm with OIDC support
-        run: npm install --global 'npm@^11.5.1'
+        run: npm install --global 'npm@^11.15.0'
 
       - name: Preflight version and registry
         id: preflight
@@ -118,7 +118,7 @@ jobs:
                 execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()) {
               throw new Error(`Unpublished tag ${latest} needs manual recovery at its tagged commit`)
             }
-            action = 'publish'
+            action = 'stage'
             version = latestVersion
           } else {
             if (manifest.version !== latestVersion) throw new Error('Branch version differs from latest release tag')
@@ -144,7 +144,7 @@ jobs:
           NODE
 
       - name: Install and check package
-        if: steps.preflight.outputs.action == 'new' || steps.preflight.outputs.action == 'publish'
+        if: steps.preflight.outputs.action == 'new' || steps.preflight.outputs.action == 'stage'
         run: |
           npm ci
           npm run typecheck
@@ -166,7 +166,7 @@ jobs:
           git tag "$TAG"
           git push --atomic origin HEAD:refs/heads/master "refs/tags/$TAG"
 
-      - name: Dispatch publish from the tagged commit
+      - name: Dispatch release from the tagged commit
         if: steps.preflight.outputs.action == 'new'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -177,17 +177,20 @@ jobs:
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master --field "bump=$BUMP" --field resume=true
 
       - name: Pack existing tagged version
-        if: steps.preflight.outputs.action == 'publish'
+        if: steps.preflight.outputs.action == 'stage'
         run: |
           npm run build --if-present
           npm pack --dry-run
 
-      - name: Publish with provenance
-        if: steps.preflight.outputs.action == 'publish'
-        run: npm publish --provenance --access public
+      - name: Stage package for npm approval
+        if: steps.preflight.outputs.action == 'stage'
+        run: |
+          npm stage publish --provenance --access public --tag latest
+          echo 'Approve this staged package at https://www.npmjs.com/settings/rozsazoltan/staged-packages'
+          echo 'After approval, rerun the release workflow to create the GitHub Release.'
 
       - name: Create GitHub Release
-        if: (steps.preflight.outputs.action == 'publish' || steps.preflight.outputs.action == 'repair-release') && steps.preflight.outputs.release_exists == 'false'
+        if: steps.preflight.outputs.action == 'repair-release' && steps.preflight.outputs.release_exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.preflight.outputs.tag }}
