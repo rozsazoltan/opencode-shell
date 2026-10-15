@@ -1,7 +1,7 @@
 {
   "name": "@rozsazoltan/opencode-shell",
   "version": "0.1.0",
-  "description": "Native OpenCode V2 shell environments with mise and optional snip filtering",
+  "description": "Native OpenCode V2 shell environments with mise and optional RTK command rewriting",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -25,7 +25,7 @@
     "opencode-shell",
     "mise",
     "mise-en-place",
-    "snip",
+    "rtk",
     "llm",
     "tokens",
     "cli"
