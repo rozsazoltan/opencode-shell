@@ -53,6 +53,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/master | cut -f1)"
           npm view @rozsazoltan/opencode-shell versions --json > "$RUNNER_TEMP/npm-versions.json"
+          npm view @rozsazoltan/opencode-shell dist-tags.latest --json > "$RUNNER_TEMP/npm-latest.json"
           node --input-type=module <<'NODE'
           import { appendFileSync, readFileSync } from 'node:fs'
           import { execFileSync } from 'node:child_process'
@@ -67,6 +68,7 @@ jobs:
           const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-versions.json`, 'utf8'))
           const versions = new Set(Array.isArray(published) ? published : [published])
           if (!versions.size) throw new Error('Publish the bootstrap package locally first')
+          const npmLatest = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-latest.json`, 'utf8'))
 
           const parseTag = tag => {
             const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag)
@@ -82,17 +84,18 @@ jobs:
           if (!latest || !versions.has('0.1.0') || !tags.includes('v0.1.0')) {
             throw new Error('Publish version 0.1.0 locally and push tag v0.1.0 first')
           }
+          const npmLatestVersion = parseTag(`v${npmLatest}`)
+          if (typeof npmLatest !== 'string' || !npmLatestVersion) {
+            throw new Error(`Invalid npm latest dist-tag version: ${npmLatest}`)
+          }
+          if (compare(npmLatestVersion, parseTag(latest)) > 0) {
+            throw new Error(`npm latest version ${npmLatest} is ahead of the latest release tag ${latest}`)
+          }
           const bootstrap = JSON.parse(execFileSync('git', ['show', 'v0.1.0:package.json'], { encoding: 'utf8' }))
           if (bootstrap.name !== packageName || bootstrap.version !== '0.1.0') {
             throw new Error('Bootstrap tag does not point to the published package version')
           }
           const latestVersion = latest.slice(1)
-          for (const publishedVersion of versions) {
-            const parsed = parseTag(`v${publishedVersion}`)
-            if (!parsed || compare(parsed, parseTag(latest)) > 0) {
-              throw new Error(`npm version ${publishedVersion} is not covered by the latest release tag`)
-            }
-          }
           // GraphQL returns null for a missing release; authentication/API errors fail the preflight.
           const releaseResponse = JSON.parse(execFileSync('gh', [
             'api', 'graphql',
