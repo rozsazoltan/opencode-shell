@@ -1,6 +1,4 @@
 import { execFile } from "node:child_process"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { ShellCreateBefore } from "@opencode/plugin/promise/shell"
 
@@ -18,6 +16,15 @@ function capture(file: string, args: string[], cwd: string, env: Environment, in
     })
     child.stdin?.on("error", () => {})
     child.stdin?.end(input)
+  })
+}
+
+function rewrite(command: string, cwd: string, env: Environment): Promise<{ code: number; stdout: string } | undefined> {
+  return new Promise((resolve) => {
+    execFile("rtk", ["rewrite", command], { cwd, env, timeout: 2000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+      const code = error && "code" in error && typeof error.code === "number" ? error.code : error ? undefined : 0
+      resolve(code === undefined ? undefined : { code, stdout })
+    })
   })
 }
 
@@ -56,30 +63,24 @@ export async function augment(event: ShellCreateBefore): Promise<void> {
     event.env = { ...event.env, ...managed }
   }
 
-  // Direct snip invocations are already filtered, including our PowerShell form.
-  if (/^\s*(?:&\s+)?(?:"(?:[^"\r\n]*[\\/])?snip(?:\.exe)?"|'(?:[^'\r\n]|'')*snip(?:\.exe)?'|(?:[^\s"']*[\\/])?snip(?:\.exe)?)\s+run\s+--(?:\s|$)/i.test(event.command)) return
+  if (event.env.RTK_DISABLED === "1") return
 
-  // snip's parser is POSIX-oriented. Only unambiguous bare native commands are
+  // RTK's parser is POSIX-oriented. Only unambiguous bare native commands are
   // eligible in PowerShell; expressions, quoting and control flow stay intact.
-  if (kind === "powershell" && !/^[A-Za-z][A-Za-z0-9_.-]*(?: +[A-Za-z0-9_./:=,@%+-]+)* *$/.test(event.command)) return
-  // Desktop-started servers may omit ~/bin from PATH; try it only when snip is not found.
-  const output = await capture("snip", ["hook"], event.cwd, event.env, JSON.stringify({ tool_name: "Bash", tool_input: { command: event.command } }), join(homedir(), "bin", process.platform === "win32" ? "snip.exe" : "snip"))
-  if (!output) return
-  try {
-    const command: unknown = JSON.parse(output).hookSpecificOutput?.updatedInput?.command
-    if (typeof command !== "string" || !command) return
-    if (kind === "posix") event.command = command
-    else {
-      // Accept only the documented simple snip invocation, never arbitrary
-      // POSIX rewrites. Single quotes prevent PowerShell path interpolation.
-      const match = /^"([^"\r\n]+)" run -- (.+)$/.exec(command)
-      if (match && match[2] === event.command) {
-        event.command = `& '${match[1].replaceAll("'", "''")}' run -- ${match[2]}`
-      }
-    }
-  } catch {
-    // Missing/old snip or malformed output leaves the command unchanged.
-  }
+  const simplePowerShellCommand = /^[A-Za-z][A-Za-z0-9_.-]*(?: +[A-Za-z0-9_./:=,@%+-]+)* *$/
+  if (kind === "powershell" && !simplePowerShellCommand.test(event.command)) return
+
+  const result = await rewrite(event.command, event.cwd, event.env)
+  if (!result) return
+  if (result.code === 2) throw new Error("RTK denied this command")
+  if (result.code !== 0 && result.code !== 3) return
+
+  const command = result.stdout.trimEnd()
+  if (!command) return
+  // RTK output remains subject to the host's normal shell permission check.
+  // Restrict PowerShell rewrites to the same simple bare-command form.
+  if (kind === "powershell" && !simplePowerShellCommand.test(command)) return
+  event.command = command
 }
 
 export default Plugin.define({
