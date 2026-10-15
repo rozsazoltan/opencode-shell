@@ -9,16 +9,16 @@ function event(command = "git status", shell = "/bin/bash"): ShellCreateBefore {
   return { command, shell, cwd: "/project", env: { PATH: "/external", KEEP: "yes" }, timeout: 10000 }
 }
 
-function outputs(mise?: string, snip?: string) {
+function outputs(mise?: string, rtk?: { code?: number; stdout?: string; error?: Error }) {
   calls.run.mockImplementation((file, _args, _options, callback) => {
-    const output = file === "mise" ? mise : snip
-    callback(output === undefined ? new Error("unavailable") : null, output ?? "")
+    if (file === "mise") {
+      callback(mise === undefined ? new Error("unavailable") : null, mise ?? "")
+    } else {
+      const error = rtk?.error ?? (rtk?.code === 0 ? null : rtk?.code === undefined ? Object.assign(new Error("unavailable"), { code: "ENOENT" }) : Object.assign(new Error("RTK exited"), { code: rtk.code }))
+      callback(error, rtk?.stdout ?? "")
+    }
     return { stdin: { on: vi.fn(), end: vi.fn() } }
   })
-}
-
-function rewrite(command: string) {
-  return JSON.stringify({ hookSpecificOutput: { updatedInput: { command } } })
 }
 
 beforeEach(() => { calls.run.mockReset() })
@@ -30,7 +30,7 @@ describe("native shell augmentation", () => {
     expect(hook).toHaveBeenCalledWith("create.before", augment)
   })
 
-  it("applies mise without snip, preserving complex command text and inherited variables", async () => {
+  it("applies mise while preserving complex command text and inherited variables", async () => {
     outputs(JSON.stringify({ PATH: "/managed:/external", ADDED: "value", MISE_YES: "0" }))
     const input = event("cd sub && node -v | head > version.txt")
     await augment(input)
@@ -45,28 +45,46 @@ describe("native shell augmentation", () => {
     expect(calls.run.mock.calls[0][1]).toEqual(["env", "--json"])
   })
 
-  it("uses separately installed snip when mise is unavailable", async () => {
-    outputs(undefined, rewrite('"/external/snip" run -- git status'))
+  it.each([0, 3])("applies RTK stdout when rewrite exits %i", async (code) => {
+    outputs(JSON.stringify({ PATH: "/managed:/external" }), { code, stdout: "git status --short\n" })
     const input = event()
     await augment(input)
-    expect(input.command).toBe('"/external/snip" run -- git status')
-    expect(input.env).toEqual({ PATH: "/external", KEEP: "yes" })
+    expect(input.command).toBe("git status --short")
+    expect(calls.run.mock.calls[1][0]).toBe("rtk")
+    expect(calls.run.mock.calls[1][1]).toEqual(["rewrite", "git status"])
+    expect(calls.run.mock.calls[1][2]).toMatchObject({ cwd: "/project", env: { PATH: "/managed:/external" } })
   })
 
-  it("resolves snip using the managed environment", async () => {
-    outputs(JSON.stringify({ PATH: "/managed:/external" }), rewrite('"/managed/snip" run -- git status'))
-    await augment(event())
-    expect(calls.run.mock.calls[1][2].env.PATH).toBe("/managed:/external")
-  })
-
-  it("fixes quoted PowerShell executable invocation and escapes apostrophes", async () => {
-    outputs(undefined, rewrite('"C:\\User\'s tools\\snip.exe" run -- git status'))
-    const input = event("git status", "C:\\Windows\\powershell.exe")
+  it("passes through RTK exit code 1", async () => {
+    outputs(undefined, { code: 1, stdout: "git status --short" })
+    const input = event()
     await augment(input)
-    expect(input.command).toBe("& 'C:\\User''s tools\\snip.exe' run -- git status")
+    expect(input.command).toBe("git status")
   })
 
-  it.each(["git log | head", "$env:FOO='x'; git status", "git status && git log", "git log $(git rev-parse HEAD)", "& 'snip.exe' run -- git status"])("leaves complex PowerShell syntax intact: %s", async (command) => {
+  it("denies RTK exit code 2", async () => {
+    outputs(undefined, { code: 2, stdout: "git status --short" })
+    await expect(augment(event())).rejects.toThrow("RTK denied this command")
+  })
+
+  it("passes through unknown RTK errors", async () => {
+    outputs(undefined, { error: new Error("unexpected failure") })
+    const input = event()
+    await augment(input)
+    expect(input.command).toBe("git status")
+  })
+
+  it("skips RTK when disabled", async () => {
+    outputs()
+    const input = event()
+    input.env.RTK_DISABLED = "1"
+    await augment(input)
+    expect(input.command).toBe("git status")
+    expect(calls.run).toHaveBeenCalledTimes(1)
+    expect(calls.run.mock.calls[0][0]).toBe("mise")
+  })
+
+  it.each(["git log | head", "$env:FOO='x'; git status", "git status && git log", "git log $(git rev-parse HEAD)", "& 'rtk' rewrite git status"])("leaves complex PowerShell syntax intact: %s", async (command) => {
     outputs(JSON.stringify({ PATH: "/managed" }))
     const input = event(command, "pwsh")
     await augment(input)
@@ -92,18 +110,10 @@ describe("native shell augmentation", () => {
   })
 
   it("fails open on malformed probe output", async () => {
-    outputs("not json", "not json")
+    outputs("not json")
     const input = event()
     await augment(input)
     expect(input).toEqual(event())
-  })
-
-  it.each(['"/external/snip" run -- git status', "snip run -- git status", "& 'C:\\User''s tools\\snip.exe' run -- git status"])("does not double wrap: %s", async (command) => {
-    outputs(undefined, rewrite('"/external/snip" run -- snip run -- git status'))
-    const input = event(command)
-    await augment(input)
-    expect(input.command).toBe(command)
-    expect(calls.run).toHaveBeenCalledTimes(1)
   })
 
   it("preserves the caller's mise confirmation setting", async () => {
@@ -121,10 +131,10 @@ describe("native shell augmentation", () => {
     expect(input.env).toEqual(event().env)
   })
 
-  it("rejects unrelated PowerShell rewrites", async () => {
-    outputs(undefined, rewrite('"C:\\snip.exe" run -- git log'))
-    const input = event("git status", "pwsh")
+  it("applies an unambiguous rewrite in PowerShell", async () => {
+    outputs(undefined, { code: 0, stdout: "git status --short\n" })
+    const input = event("git status", "C:\\Windows\\powershell.exe")
     await augment(input)
-    expect(input.command).toBe("git status")
+    expect(input.command).toBe("git status --short")
   })
 })
