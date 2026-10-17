@@ -21,6 +21,8 @@ Then add the plugin to your OpenCode configuration:
 
 Mise and RTK work independently: without mise the existing environment is kept; without RTK commands are not rewritten. RTK must be available on the server's managed `PATH`. Set `RTK_DISABLED=1` to bypass rewriting.
 
+Shell activation is not required, including in Desktop. Before each supported shell command, the plugin runs `mise env --json` for that command's cwd with its inherited environment, then resolves RTK using the enriched environment. Nothing is cached or assigned to global `process.env`. If mise is not on PATH, Unix hosts also try the [official installer's](https://mise.jdx.dev/getting-started.html) fixed `~/.local/bin/mise` location. Windows requires mise on the server PATH: package-manager-specific paths are not guessed. No shell profiles are sourced or tools automatically installed.
+
 ## Diagnostics
 
 Diagnostics are silent by default. To opt in to sanitized JSON console records, use:
@@ -31,9 +33,15 @@ Diagnostics are silent by default. To opt in to sanitized JSON console records, 
 }
 ```
 
-Run `/opencode-shell-diagnostics` in OpenCode for a direct report without an LLM call, even with debug disabled. It runs only bounded `mise --version` and `rtk --version` probes in the OpenCode server process environment at the plugin location. It does not run `mise env`, install tools, approve trust, or execute supplied command arguments. Executables found on the server PATH must still be trusted.
+For visible tool output, ask the OpenCode agent: **“Invoke the `opencode_shell_diagnostics` tool with `{}` and show its diagnostic report.”** This no-argument tool returns the report as text through OpenCode's normal tool-result API, even with debug disabled. Its permission category is `opencode_shell_diagnostics`; normal host permissions still apply. It does not grant or bypass permissions.
 
-This baseline is **not the actual shell event environment**: native shell execution may receive different environment values and mise additions. The report includes only the last completed hook's sanitized outcomes for this plugin instance (including a denied hook), or `not_observed`. Concurrent hooks report whichever completes last; no commands or environment snapshots are retained.
+The compatibility slash command `/opencode-shell-diagnostics` submits the same report as **synthetic session input**, without starting an LLM call. The V2 server command API returns no display result; synthetic input is not an assistant reply and may not appear as visible chat output. Its visibility/notification behavior depends on the client. Repeating the command submits another report. Use the agent-invokable tool when you need a normal tool result.
+
+Diagnostics use the same cwd-specific environment-resolution logic at the plugin location, starting from the OpenCode server environment: bounded `mise env --json`, then `mise --version` and `rtk --version` in the managed environment. They do not install tools, approve trust, or execute supplied command arguments. **Environment resolution can run scripts in already trusted mise configurations**, just like the shell hook; only invoke diagnostics in trusted projects. Auto-install and automatic trust confirmation are disabled. Executables on the managed PATH must still be trusted.
+
+The diagnostic location and inherited environment can differ from a shell event's cwd and environment, so this is not an exact replay of the last shell event. The report also includes the last completed hook's sanitized outcomes for this plugin instance (including a denied hook), or `not_observed`. Concurrent hooks report whichever completes last; no commands or environment snapshots are retained.
+
+The RTK version probe now uses the environment after mise, not the unmodified server baseline. The report separately identifies observed RTK availability in the last hook's environment from its numeric rewrite exit code. A skipped rewrite does not measure RTK availability. This last-hook observation is instance-wide, not session-specific. Rewrite `applied` means command text changed; `unchanged` means it did not. Neither proves that OpenCode approved or executed the command, or that RTK recorded token savings: execution and tracking are explicitly `not_measured`.
 
 Debug records contain plugin/OpenCode versions, registration and hook outcomes, fixed skip reasons, and RTK exit codes. They exclude command text, paths, environment values, subprocess output, and raw errors. Logging failures do not affect shell execution. The local dev entrypoint supports the same option and command under the `opencode-shell-dev` ID.
 

@@ -2,26 +2,11 @@ import { execFile } from "node:child_process"
 import { Plugin } from "@opencode/plugin"
 import type { ShellCreateBefore } from "@opencode/plugin/promise/shell"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { observe, probeFailure, versionProbe, type Observe, type Outcome, type ProbeFailure } from "./diagnostics"
+import { hookSummary, observe, probeFailure, versionProbe, type Observe, type Outcome, type ProbeFailure } from "./diagnostics"
 import manifest from "../package.json"
+import { managedEnvironment, type Environment } from "./environment"
 
-type Environment = Record<string, string | undefined>
 type ProbeResult<T> = { status: "ok"; value: T } | { status: ProbeFailure }
-
-// Environment resolution may execute hooks in already trusted mise config.
-function capture(file: string, args: string[], cwd: string, env: Environment, input?: string, fallback?: string): Promise<ProbeResult<string>> {
-  return new Promise((resolve) => {
-    const child = execFile(file, args, { cwd, env, timeout: 2000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
-      if (error && "code" in error && error.code === "ENOENT" && fallback) {
-        resolve(capture(fallback, args, cwd, env, input))
-        return
-      }
-      resolve(error ? { status: probeFailure(error) } : { status: "ok", value: stdout })
-    })
-    child.stdin?.on("error", () => {})
-    child.stdin?.end(input)
-  })
-}
 
 function rewrite(command: string, cwd: string, env: Environment): Promise<ProbeResult<{ code: number; stdout: string }>> {
   return new Promise((resolve) => {
@@ -38,38 +23,15 @@ function dialect(shell: string): "posix" | "powershell" | undefined {
   if (name === "bash" || name === "zsh" || name === "sh" || name === "dash") return "posix"
 }
 
-function environment(output: string | undefined): Environment | undefined {
-  if (!output) return
-  try {
-    const value: unknown = JSON.parse(output)
-    if (!value || typeof value !== "object" || Array.isArray(value)) return
-    if (Object.values(value).some((entry) => typeof entry !== "string")) return
-    return value as Environment
-  } catch {
-    return
-  }
-}
-
 export async function augment(event: ShellCreateBefore, observer?: Observe): Promise<void> {
   const report = (outcome: Outcome) => observe(observer, outcome)
   report({ stage: "hook", result: "entered" })
   const kind = dialect(event.shell)
   if (!kind) { report({ stage: "hook", result: "unsupported_shell" }); return }
 
-  const probeEnv = { ...event.env, MISE_AUTO_INSTALL: "0", MISE_EXEC_AUTO_INSTALL: "0", MISE_YES: "0" }
-  // The documented JSON interface needs no child runtime. It reports additions
-  // and overrides, not removals; inherited variables must therefore be retained.
-  const probe = await capture("mise", ["env", "--json"], event.cwd, probeEnv)
-  const managed = probe.status === "ok" ? environment(probe.value) : undefined
-  report({ stage: "mise", result: probe.status !== "ok" ? probe.status : managed ? "applied" : "invalid_environment" })
-  if (managed) {
-    // Keep auto-install disabled for lazy mise shims in the executed command.
-    managed.MISE_AUTO_INSTALL = "0"
-    managed.MISE_EXEC_AUTO_INSTALL = "0"
-    // Do not propagate the probe's trust-confirmation setting.
-    delete managed.MISE_YES
-    event.env = { ...event.env, ...managed }
-  }
+  const managed = await managedEnvironment(event.cwd, event.env)
+  report({ stage: "mise", result: managed.status })
+  event.env = managed.env
 
   if (event.env.RTK_DISABLED === "1") { report({ stage: "rtk", result: "disabled" }); return }
 
@@ -109,20 +71,36 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
     } finally { last = outcomes }
   })
   log({ stage: "setup", result: "hook_registered", opencodeVersion: ctx.app.version })
+  const report = async (): Promise<string> => {
+    const snapshot = last.slice()
+    const managed = await managedEnvironment(ctx.location.directory, process.env)
+    const [mise, rtk] = await Promise.all([versionProbe("mise", ctx.location.directory, managed.env, managed.mise), versionProbe("rtk", ctx.location.directory, managed.env)])
+    return [
+      `${id} ${manifest.version}; OpenCode ${ctx.app.version}`,
+      `Debug logging: ${debug ? "enabled" : "disabled"}; shell hook: registered`,
+      "Diagnostic environment: cwd-specific mise env applied to the OpenCode server environment at the plugin location; not the actual shell event environment.",
+      `mise environment: ${managed.status}; mise: ${mise}; rtk: ${rtk}`,
+      hookSummary(snapshot),
+      "Diagnostic location and shell-event cwd or inherited environment may differ. The last hook is instance-wide, not session-specific.",
+      "Command execution and RTK gain/tracking: not_measured. A successful rewrite only changes the command before host permission checks; it does not prove execution or tracking.",
+      `Last completed hook (sanitized, instance-local; no environment retained): ${snapshot.length ? JSON.stringify(snapshot) : "not_observed"}`,
+    ].join("\n")
+  }
+  await ctx.tool.transform((editor) => {
+    editor.add({
+      name: "opencode_shell_diagnostics",
+      description: "Bounded cwd-specific mise environment resolution (trusted config may run hooks), mise/RTK version probes and sanitized last-hook diagnostics; no arguments, commands, paths or environment values are returned",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      options: { permission: "opencode_shell_diagnostics" },
+      async execute() { return { content: await report() } },
+    })
+  })
   await ctx.command.transform((editor) => {
     editor.add({
       name: "opencode-shell-diagnostics",
-      description: "Read-only server baseline mise/RTK diagnostics without commands, paths or environment values",
+      description: "Managed-environment mise/RTK diagnostics (trusted mise config may run hooks); no commands, paths or environment values returned",
       async execute({ sessionID, delivery }) {
-        const snapshot = last.slice()
-        const [mise, rtk] = await Promise.all([versionProbe("mise", ctx.location.directory), versionProbe("rtk", ctx.location.directory)])
-        await ctx.session.synthetic({ sessionID, delivery, resume: false, text: [
-          `${id} ${manifest.version}; OpenCode ${ctx.app.version}`,
-          `Debug logging: ${debug ? "enabled" : "disabled"}; shell hook: registered`,
-          "Baseline: OpenCode server process environment at the plugin location, not the actual shell event environment. No mise env probe is run here.",
-          `mise: ${mise}; rtk: ${rtk}`,
-          `Last completed hook (sanitized, instance-local; no environment retained): ${snapshot.length ? JSON.stringify(snapshot) : "not_observed"}`,
-        ].join("\n") })
+        await ctx.session.synthetic({ sessionID, delivery, resume: false, text: await report() })
       },
     })
   })
