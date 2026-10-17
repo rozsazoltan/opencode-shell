@@ -108,15 +108,29 @@ jobs:
             throw new Error(`Could not verify GitHub Release for ${latest}`)
           }
           const releaseExists = releaseResponse.data.repository.release !== null
-          let action, version
+          let action, version, tagCommit
           if (versions.has(latestVersion) && !releaseExists) {
             action = 'repair-release'
             version = latestVersion
           } else if (!versions.has(latestVersion)) {
-            if (manifest.version !== latestVersion ||
-                execFileSync('git', ['rev-list', '-n', '1', latest], { encoding: 'utf8' }).trim() !==
-                execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()) {
-              throw new Error(`Unpublished tag ${latest} needs manual recovery at its tagged commit`)
+            tagCommit = execFileSync('git', ['rev-list', '-n', '1', latest], { encoding: 'utf8' }).trim()
+            if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tagCommit)) {
+              throw new Error(`Could not resolve ${latest} to a commit`)
+            }
+            try {
+              execFileSync('git', ['merge-base', '--is-ancestor', tagCommit,
+                execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()],
+              { stdio: 'ignore' })
+            } catch {
+              throw new Error(`Unpublished tag ${latest} is not an ancestor of master; refusing recovery`)
+            }
+            const taggedManifest = JSON.parse(execFileSync('git', ['show', `${latest}:package.json`], { encoding: 'utf8' }))
+            const taggedLock = JSON.parse(execFileSync('git', ['show', `${latest}:package-lock.json`], { encoding: 'utf8' }))
+            if (taggedManifest.name !== packageName || taggedManifest.version !== latestVersion ||
+                taggedLock.name !== packageName || taggedLock.version !== latestVersion ||
+                taggedLock.packages?.['']?.name !== packageName ||
+                taggedLock.packages?.['']?.version !== latestVersion) {
+              throw new Error(`Unpublished tag ${latest} has a package manifest/lockfile mismatch`)
             }
             action = 'stage'
             version = latestVersion
@@ -139,9 +153,16 @@ jobs:
             }
           }
           if (!parseTag(`v${version}`)) throw new Error(`Invalid SemVer version ${version}`)
-          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\nversion=${version}\ntag=v${version}\nrelease_exists=${releaseExists}\n`)
+          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\nversion=${version}\ntag=v${version}\ntag_commit=${tagCommit ?? ''}\nrelease_exists=${releaseExists}\n`)
           console.log(`${action}: ${version}`)
           NODE
+
+      - name: Checkout tagged release commit for staging
+        if: steps.preflight.outputs.action == 'stage'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.preflight.outputs.tag_commit }}
+          fetch-depth: 0
 
       - name: Install and check package
         if: steps.preflight.outputs.action == 'new' || steps.preflight.outputs.action == 'stage'

@@ -41,6 +41,7 @@
   },
   "files": [
     "src/index.ts",
+    "src/diagnostics.ts",
     "THIRD_PARTY_NOTICES"
   ]
 }
