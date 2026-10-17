@@ -3,24 +3,28 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      bump:
-        description: Version bump for a new release (ignored when staging or repairing an existing tag)
-        required: true
+      release_type:
+        description: "SemVer release type used by the prepare run"
         type: choice
-        options: [patch, minor, major]
-      resume:
-        description: Internal release dispatch; leave unchecked for manual releases
-        type: boolean
-        default: false
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: "Version to stage; set by the chained stage run (leave empty to prepare)"
+        type: string
+        default: ""
 
 permissions:
+  actions: write
   contents: write
   id-token: write
-  actions: write
 
 concurrency:
-  # The new commit's dispatch must not replace a pending run for the old SHA.
-  group: release-${{ github.ref }}-${{ github.sha }}
+  # Prepare and stage runs use separate groups so a newly queued run can never
+  # replace a pending chained stage run.
+  group: release-${{ inputs.version == '' && 'prepare' || 'stage' }}
   cancel-in-progress: false
 
 jobs:
@@ -30,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v6
@@ -41,28 +46,39 @@ jobs:
       - name: Use npm with OIDC support
         run: npm install --global 'npm@^11.15.0'
 
-      - name: Preflight version and registry
-        id: preflight
+      # An empty version input prepares a release (bump, commit, tag, dispatch);
+      # a non-empty version input stages that exact version. This is the only switch.
+      - name: Determine mode
+        id: mode
         env:
-          GH_TOKEN: ${{ github.token }}
-          BUMP: ${{ inputs.bump }}
-          RESUME: ${{ inputs.resume }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo 'mode=stage' >> "$GITHUB_OUTPUT"
+          else
+            echo 'mode=prepare' >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------------- prepare mode ----------------
+
+      - name: Preflight (prepare)
+        if: steps.mode.outputs.mode == 'prepare'
         run: |
           test -z "$(git status --porcelain)"
-          test "$(git branch --show-current)" = master
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/master | cut -f1)"
           npm view @rozsazoltan/opencode-shell versions --json > "$RUNNER_TEMP/npm-versions.json"
           npm view @rozsazoltan/opencode-shell dist-tags.latest --json > "$RUNNER_TEMP/npm-latest.json"
           node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs'
+          import { readFileSync } from 'node:fs'
           import { execFileSync } from 'node:child_process'
 
           const packageName = '@rozsazoltan/opencode-shell'
           const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'))
           if (manifest.name !== packageName || lock.name !== packageName ||
-              manifest.version !== lock.version || manifest.version !== lock.packages[''].version) {
+              lock.packages?.['']?.name !== packageName ||
+              manifest.version !== lock.version || manifest.version !== lock.packages?.['']?.version) {
             throw new Error('Package name/version does not match the lockfile')
           }
           const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-versions.json`, 'utf8'))
@@ -77,6 +93,9 @@ jobs:
             return numbers.every(Number.isSafeInteger) ? numbers : undefined
           }
           const compare = (x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2]
+          const version = manifest.version
+          const tag = `v${version}`
+          if (!parseTag(tag)) throw new Error(`Invalid SemVer version ${version}`)
           const tags = execFileSync('git', ['tag', '--list', 'v*'], { encoding: 'utf8' })
             .split('\n').filter(tag => parseTag(tag))
             .sort((a, b) => compare(parseTag(a), parseTag(b)))
@@ -95,123 +114,198 @@ jobs:
           if (bootstrap.name !== packageName || bootstrap.version !== '0.1.0') {
             throw new Error('Bootstrap tag does not point to the published package version')
           }
-          const latestVersion = latest.slice(1)
+          if (compare(parseTag(tag), parseTag(latest)) < 0 ||
+              compare(parseTag(tag), npmLatestVersion) < 0) {
+            throw new Error('Committed version is behind the latest Git tag or npm latest')
+          }
+          console.log(`Preparing a release from committed version ${version}`)
+          NODE
+
+      - name: Compute next version
+        id: bump
+        if: steps.mode.outputs.mode == 'prepare'
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          case "$RELEASE_TYPE" in
+            patch | minor | major) ;;
+            *) echo "Unsupported release type: $RELEASE_TYPE" >&2; exit 1 ;;
+          esac
+          npm version "$RELEASE_TYPE" --no-git-tag-version
+          VERSION="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; process.stdout.write(JSON.parse(readFileSync("package.json", "utf8")).version)')"
+          LOCK_VERSION="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; process.stdout.write(JSON.parse(readFileSync("package-lock.json", "utf8")).version)')"
+          LOCK_PACKAGE_VERSION="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; process.stdout.write(String(JSON.parse(readFileSync("package-lock.json", "utf8")).packages?.[""]?.version))')"
+          if [ "$LOCK_VERSION" != "$VERSION" ] || [ "$LOCK_PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "Lockfile version mismatch after bump: $LOCK_VERSION / $LOCK_PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          if git tag --list "v$VERSION" | grep -q .; then
+            echo "Tag v$VERSION already exists locally" >&2
+            exit 1
+          fi
+          if git ls-remote --tags origin | awk '{print $2}' | grep -qx "refs/tags/v$VERSION"; then
+            echo "Tag v$VERSION already exists on origin" >&2
+            exit 1
+          fi
+          if node --input-type=module -e 'import { readFileSync } from "node:fs"; const v = JSON.parse(readFileSync(process.argv[1], "utf8")); process.exit((Array.isArray(v) ? v : [v]).includes(process.argv[2]) ? 0 : 1)' "$RUNNER_TEMP/npm-versions.json" "$VERSION"; then
+            echo "Version $VERSION is already published on npm" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Next version: v$VERSION"
+
+      - name: Commit, tag, and push
+        if: steps.mode.outputs.mode == 'prepare'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          test -n "$VERSION"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json
+          git commit -m "chore(release): v$VERSION"
+          git push origin HEAD:refs/heads/master
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Dispatch staging run
+        if: steps.mode.outputs.mode == 'prepare'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          gh workflow run release.yml --ref master -f version="$VERSION"
+          echo "Dispatched the stage run for v$VERSION"
+
+      - name: Prepare summary
+        if: steps.mode.outputs.mode == 'prepare'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          echo "Prepared v$VERSION: pushed the release commit and tag to master and dispatched the stage run."
+          {
+            echo '### Release prepared'
+            echo ''
+            echo "- Bumped to v${VERSION}"
+            echo '- Pushed the release commit and tag to master'
+            echo '- Dispatched the stage run; npm approval remains manual'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------- stage mode ----------------
+
+      - name: Preflight (stage)
+        id: preflight
+        if: steps.mode.outputs.mode == 'stage'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/master | cut -f1)"
+          npm view @rozsazoltan/opencode-shell versions --json > "$RUNNER_TEMP/npm-versions.json"
+          npm view @rozsazoltan/opencode-shell dist-tags.latest --json > "$RUNNER_TEMP/npm-latest.json"
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+
+          const packageName = '@rozsazoltan/opencode-shell'
+          const version = process.env.INPUT_VERSION
+          if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+            throw new Error(`Invalid version input ${version}; expected X.Y.Z`)
+          }
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'))
+          if (manifest.name !== packageName || lock.name !== packageName ||
+              lock.packages?.['']?.name !== packageName ||
+              manifest.version !== version || lock.version !== version || lock.packages?.['']?.version !== version) {
+            throw new Error('Package name/version does not match the requested version and lockfile')
+          }
+          const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-versions.json`, 'utf8'))
+          const versions = new Set(Array.isArray(published) ? published : [published])
+          if (!versions.size) throw new Error('Publish the bootstrap package locally first')
+          const npmLatest = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-latest.json`, 'utf8'))
+
+          const parseTag = tag => {
+            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag)
+            if (!match) return
+            const numbers = match.slice(1).map(Number)
+            return numbers.every(Number.isSafeInteger) ? numbers : undefined
+          }
+          const compare = (x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2]
+          const tag = `v${version}`
+          if (!parseTag(tag)) throw new Error(`Invalid SemVer version ${version}`)
+          const tags = execFileSync('git', ['tag', '--list', 'v*'], { encoding: 'utf8' })
+            .split('\n').filter(tag => parseTag(tag))
+            .sort((a, b) => compare(parseTag(a), parseTag(b)))
+          const latest = tags.at(-1)
+          if (!latest || !versions.has('0.1.0') || !tags.includes('v0.1.0')) {
+            throw new Error('Publish version 0.1.0 locally and push tag v0.1.0 first')
+          }
+          const npmLatestVersion = parseTag(`v${npmLatest}`)
+          if (typeof npmLatest !== 'string' || !npmLatestVersion) {
+            throw new Error(`Invalid npm latest dist-tag version: ${npmLatest}`)
+          }
+          if (compare(npmLatestVersion, parseTag(latest)) > 0) {
+            throw new Error(`npm latest version ${npmLatest} is ahead of the latest release tag ${latest}`)
+          }
+          const bootstrap = JSON.parse(execFileSync('git', ['show', 'v0.1.0:package.json'], { encoding: 'utf8' }))
+          if (bootstrap.name !== packageName || bootstrap.version !== '0.1.0') {
+            throw new Error('Bootstrap tag does not point to the published package version')
+          }
+          // The prepare run owns tag creation; the stage run only verifies the tag
+          // points at the exact source commit it is about to attest.
+          if (!tags.includes(tag)) {
+            throw new Error(`Missing tag ${tag}; the prepare run must create it first`)
+          }
+          const tagCommit = execFileSync('git', ['rev-list', '-n', '1', tag], { encoding: 'utf8' }).trim()
+          if (tagCommit !== process.env.GITHUB_SHA) {
+            throw new Error(`${tag} does not point to the workflow SHA; refusing to stage a different source commit`)
+          }
+          if (compare(parseTag(tag), parseTag(latest)) < 0 ||
+              compare(parseTag(tag), npmLatestVersion) < 0) {
+            throw new Error('Staged version is behind the latest Git tag or npm latest')
+          }
           // GraphQL returns null for a missing release; authentication/API errors fail the preflight.
           const releaseResponse = JSON.parse(execFileSync('gh', [
             'api', 'graphql',
             '-f', 'query=query($owner:String!,$repo:String!,$tag:String!){repository(owner:$owner,name:$repo){release(tagName:$tag){tagName}}}',
-            '-f', 'owner=rozsazoltan', '-f', 'repo=opencode-shell', '-f', `tag=${latest}`,
+            '-f', 'owner=rozsazoltan', '-f', 'repo=opencode-shell', '-f', `tag=${tag}`,
           ], { encoding: 'utf8' }))
           if (releaseResponse.errors?.length || !releaseResponse.data?.repository ||
               (releaseResponse.data.repository.release !== null &&
-               releaseResponse.data.repository.release?.tagName !== latest)) {
-            throw new Error(`Could not verify GitHub Release for ${latest}`)
+               releaseResponse.data.repository.release?.tagName !== tag)) {
+            throw new Error(`Could not verify GitHub Release for ${tag}`)
           }
           const releaseExists = releaseResponse.data.repository.release !== null
-          let action, version, tagCommit
-          if (versions.has(latestVersion) && !releaseExists) {
-            action = 'repair-release'
-            version = latestVersion
-          } else if (!versions.has(latestVersion)) {
-            tagCommit = execFileSync('git', ['rev-list', '-n', '1', latest], { encoding: 'utf8' }).trim()
-            if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tagCommit)) {
-              throw new Error(`Could not resolve ${latest} to a commit`)
-            }
-            try {
-              execFileSync('git', ['merge-base', '--is-ancestor', tagCommit,
-                execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()],
-              { stdio: 'ignore' })
-            } catch {
-              throw new Error(`Unpublished tag ${latest} is not an ancestor of master; refusing recovery`)
-            }
-            const taggedManifest = JSON.parse(execFileSync('git', ['show', `${latest}:package.json`], { encoding: 'utf8' }))
-            const taggedLock = JSON.parse(execFileSync('git', ['show', `${latest}:package-lock.json`], { encoding: 'utf8' }))
-            if (taggedManifest.name !== packageName || taggedManifest.version !== latestVersion ||
-                taggedLock.name !== packageName || taggedLock.version !== latestVersion ||
-                taggedLock.packages?.['']?.name !== packageName ||
-                taggedLock.packages?.['']?.version !== latestVersion) {
-              throw new Error(`Unpublished tag ${latest} has a package manifest/lockfile mismatch`)
-            }
-            action = 'stage'
-            version = latestVersion
-          } else {
-            if (manifest.version !== latestVersion) throw new Error('Branch version differs from latest release tag')
-            if (process.env.RESUME === 'true') {
-              action = 'complete'
-              version = latestVersion
-            } else {
-              const [major, minor, patch] = parseTag(latest)
-              const bump = process.env.BUMP
-              if (bump === 'major') version = `${major + 1}.0.0`
-              else if (bump === 'minor') version = `${major}.${minor + 1}.0`
-              else if (bump === 'patch') version = `${major}.${minor}.${patch + 1}`
-              else throw new Error(`Invalid bump: ${bump}`)
-              if (versions.has(version) || tags.includes(`v${version}`)) {
-                throw new Error(`Version ${version} already exists on npm or in Git tags`)
-              }
-              action = 'new'
-            }
-          }
-          if (!parseTag(`v${version}`)) throw new Error(`Invalid SemVer version ${version}`)
-          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\nversion=${version}\ntag=v${version}\ntag_commit=${tagCommit ?? ''}\nrelease_exists=${releaseExists}\n`)
+          // Only public registry publication is evidence for repair without staging.
+          // A reserved staged version or an existing Release is not such evidence.
+          const action = versions.has(version) ? (releaseExists ? 'complete' : 'repair-release') : 'stage'
+          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\ntag=${tag}\nrelease_exists=${releaseExists}\n`)
           console.log(`${action}: ${version}`)
           NODE
 
-      - name: Checkout tagged release commit for staging
-        if: steps.preflight.outputs.action == 'stage'
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ steps.preflight.outputs.tag_commit }}
-          fetch-depth: 0
-
       - name: Install and check package
-        if: steps.preflight.outputs.action == 'new' || steps.preflight.outputs.action == 'stage'
+        if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage'
         run: |
           npm ci
           npm run typecheck
           npm test
 
-      - name: Commit and tag new version
-        if: steps.preflight.outputs.action == 'new'
-        env:
-          VERSION: ${{ steps.preflight.outputs.version }}
-          TAG: ${{ steps.preflight.outputs.tag }}
-        run: |
-          npm version "$VERSION" --no-git-tag-version
-          npm run build --if-present
-          npm pack --dry-run
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add package.json package-lock.json
-          git commit -m "chore(release): $TAG"
-          git tag "$TAG"
-          git push --atomic origin HEAD:refs/heads/master "refs/tags/$TAG"
-
-      - name: Dispatch release from the tagged commit
-        if: steps.preflight.outputs.action == 'new'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUMP: ${{ inputs.bump }}
-        run: |
-          # workflow_dispatch creates a fresh run at the updated master tip.
-          # If this request fails, the pushed tag remains for a manual retry.
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref master --field "bump=$BUMP" --field resume=true
-
       - name: Pack existing tagged version
-        if: steps.preflight.outputs.action == 'stage'
+        if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage'
         run: |
           npm run build --if-present
           npm pack --dry-run
 
       - name: Stage package for npm approval
-        if: steps.preflight.outputs.action == 'stage'
+        if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage'
         run: |
           npm stage publish --provenance --access public --tag latest
           echo 'Approve this staged package at https://www.npmjs.com/settings/rozsazoltan/staged-packages'
-          echo 'After approval, rerun the release workflow to create the GitHub Release.'
 
       - name: Create GitHub Release
-        if: steps.preflight.outputs.action == 'repair-release' && steps.preflight.outputs.release_exists == 'false'
+        if: steps.mode.outputs.mode == 'stage' && (steps.preflight.outputs.action == 'stage' || steps.preflight.outputs.action == 'repair-release') && steps.preflight.outputs.release_exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.preflight.outputs.tag }}
