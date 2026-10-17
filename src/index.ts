@@ -98,9 +98,9 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
   await ctx.command.transform((editor) => {
     editor.add({
       name: "opencode-shell-diagnostics",
-      description: "Managed-environment mise/RTK diagnostics (trusted mise config may run hooks); no commands, paths or environment values returned",
+      description: "Ask the agent to invoke managed-environment mise/RTK diagnostics (trusted mise config may run hooks)",
       async execute({ sessionID, delivery }) {
-        await ctx.session.synthetic({ sessionID, delivery, resume: false, text: await report() })
+        await ctx.session.prompt({ sessionID, delivery, text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Do not perform any additional investigation." })
       },
     })
   })

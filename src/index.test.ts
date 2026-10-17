@@ -80,15 +80,16 @@ function context(debug: unknown = false) {
   let hook: (event: ShellCreateBefore) => Promise<void>
   let command: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }
   const synthetic = vi.fn()
+  const prompt = vi.fn()
   let tool: { name: string; input: unknown; options: unknown; execute(): Promise<{ content: string }> }
   const ctx = {
     options: { debug }, app: { version: "2.0.21" }, location: { directory: "/private-project" },
     shell: { hook: vi.fn((_name, callback) => { hook = callback }) },
     command: { transform: vi.fn((callback) => callback({ add: (definition: typeof command) => { command = definition } })) },
     tool: { transform: vi.fn((callback) => callback({ add: (definition: typeof tool) => { tool = definition } })) },
-    session: { synthetic },
+    session: { synthetic, prompt },
   }
-  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, hook: () => hook, command: () => command, tool: () => tool }
+  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: () => command, tool: () => tool }
 }
 
 describe("privacy-safe diagnostics", () => {
@@ -108,17 +109,32 @@ describe("privacy-safe diagnostics", () => {
     const { content } = await fixture.tool().execute()
     expect(calls.run).toHaveBeenCalledTimes(3)
     expect(fixture.synthetic).not.toHaveBeenCalled()
+    expect(fixture.prompt).not.toHaveBeenCalled()
     expect(content).toContain(entry.id)
     expect(content).toContain("rtk: not_found")
     expect(content).toContain("after mise: available")
     expect(content).toContain("rewrite=applied; rewrite exit=3")
     expect(content).toContain("Command execution and RTK gain/tracking: not_measured")
     for (const secret of ["env-secret", "/private-managed", "/diagnostic-managed", "raw-secret", "rtk git status", "/private-project"]) expect(content).not.toContain(secret)
-    await fixture.command().execute({ sessionID: "session", delivery: "steer" })
-    expect(fixture.synthetic.mock.calls[0][0].text).toBe(content)
   })
 
-  it.each(["steer", "queue"] as const)("separates baseline from actual rewrite capability and preserves %s synthetic delivery", async (delivery) => {
+  it.each([plugin, devPlugin])("submits an agent tool request without upfront report probes for $id", async (entry) => {
+    for (const delivery of ["steer", "queue"] as const) {
+      const fixture = context()
+      await entry.setup(fixture.ctx)
+      const result = await fixture.command().execute({ sessionID: "session", delivery })
+      expect(result).toBeUndefined()
+      expect(fixture.prompt).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "session", delivery,
+        text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Do not perform any additional investigation.",
+      })
+      expect(fixture.synthetic).not.toHaveBeenCalled()
+      expect(calls.run).not.toHaveBeenCalled()
+      expect(calls.access).not.toHaveBeenCalled()
+    }
+  })
+
+  it("separates baseline from actual rewrite capability in the tool report", async () => {
     const fixture = context()
     await plugin.setup(fixture.ctx)
     outputs('{"PATH":"/managed-secret","TOKEN":"env-secret"}', { code: 3, stdout: "rtk git status" })
@@ -128,16 +144,12 @@ describe("privacy-safe diagnostics", () => {
       expect(args).toEqual(["--version"])
       callback(file === "rtk" ? Object.assign(new Error("private-error"), { code: "ENOENT" }) : null, "mise 2026.1.1")
     })
-    const result = await fixture.command().execute({ sessionID: "session", delivery })
-    expect(result).toBeUndefined()
-    expect(fixture.synthetic).toHaveBeenCalledTimes(1)
-    const report = fixture.synthetic.mock.calls[0][0]
-    expect(report).toMatchObject({ sessionID: "session", delivery, resume: false })
-    expect(report.text).toContain("mise environment: applied; mise: available 2026.1.1; rtk: not_found")
-    expect(report.text).toContain("mise=applied; RTK availability in the shell event environment after mise: available")
-    expect(report.text).toContain("rewrite=applied; rewrite exit=3")
-    expect(report.text).toContain("Command execution and RTK gain/tracking: not_measured")
-    for (const secret of ["/managed-secret", "env-secret", "private-error", "rtk git status"]) expect(report.text).not.toContain(secret)
+    const { content } = await fixture.tool().execute()
+    expect(content).toContain("mise environment: applied; mise: available 2026.1.1; rtk: not_found")
+    expect(content).toContain("mise=applied; RTK availability in the shell event environment after mise: available")
+    expect(content).toContain("rewrite=applied; rewrite exit=3")
+    expect(content).toContain("Command execution and RTK gain/tracking: not_measured")
+    for (const secret of ["/managed-secret", "env-secret", "private-error", "rtk git status"]) expect(content).not.toContain(secret)
   })
 
   it.each([
@@ -154,8 +166,8 @@ describe("privacy-safe diagnostics", () => {
     }
     await fixture.hook()(event())
     calls.run.mockImplementation((_file, _args, _options, callback) => callback(null, "0.1.0"))
-    await fixture.command().execute({ sessionID: "session", delivery: "steer" })
-    expect(fixture.synthetic.mock.calls[0][0].text).toContain(`after mise: ${capability}; rewrite=${reason}`)
+    const { content } = await fixture.tool().execute()
+    expect(content).toContain(`after mise: ${capability}; rewrite=${reason}`)
   })
 
   it.each([0, 3])("reports unchanged RTK output for exit %i without changing the command", async (code) => {
@@ -249,13 +261,11 @@ describe("privacy-safe diagnostics", () => {
       expect(args).toEqual(["--version"])
       callback(null, "rtk 0.30.0 stdout-secret")
     })
-    await fixture.command().execute({ sessionID: "session", delivery: "steer" })
-    const result = fixture.synthetic.mock.calls[0][0]
-    expect(result.resume).toBe(false)
-    expect(result.text).toContain("not the actual shell event environment")
-    expect(result.text).toContain("denied")
-    expect(result.text).not.toContain("stdout-secret")
-    expect(result.text).not.toContain("secret-path")
+    const { content } = await fixture.tool().execute()
+    expect(content).toContain("not the actual shell event environment")
+    expect(content).toContain("denied")
+    expect(content).not.toContain("stdout-secret")
+    expect(content).not.toContain("secret-path")
   })
 
   it("ignores logger failures without changing deny or rewrite semantics", async () => {
@@ -280,8 +290,7 @@ describe("privacy-safe diagnostics", () => {
       expect(args).toEqual(["--version"])
       callback(file === "mise" ? Object.assign(new Error("private-error"), { code: "ENOENT" }) : null, "rtk 0.30.0\n")
     })
-    await fixture.command().execute({ sessionID: "session", delivery: "steer" })
-    const text = fixture.synthetic.mock.calls[0][0].text
+    const { content: text } = await fixture.tool().execute()
     expect(text).toContain("opencode-shell-dev")
     expect(text).toContain("mise: not_found; rtk: available 0.30.0")
     expect(text).toContain("not_observed")
