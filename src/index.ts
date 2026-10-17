@@ -100,7 +100,7 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
       name: "opencode-shell-diagnostics",
       description: "Ask the agent to invoke managed-environment mise/RTK diagnostics (trusted mise config may run hooks)",
       async execute({ sessionID, delivery }) {
-        await ctx.session.prompt({ sessionID, delivery, text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Do not perform any additional investigation." })
+        await ctx.session.prompt({ sessionID, delivery, text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Then briefly conclude from the report whether mise environment loading and RTK availability/rewriting work, explicitly distinguishing observed results from unmeasured command execution and RTK gain/tracking. Do not perform any additional investigation." })
       },
     })
   })

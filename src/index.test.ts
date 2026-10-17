@@ -126,7 +126,7 @@ describe("privacy-safe diagnostics", () => {
       expect(result).toBeUndefined()
       expect(fixture.prompt).toHaveBeenCalledExactlyOnceWith({
         sessionID: "session", delivery,
-        text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Do not perform any additional investigation.",
+        text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Then briefly conclude from the report whether mise environment loading and RTK availability/rewriting work, explicitly distinguishing observed results from unmeasured command execution and RTK gain/tracking. Do not perform any additional investigation.",
       })
       expect(fixture.synthetic).not.toHaveBeenCalled()
       expect(calls.run).not.toHaveBeenCalled()
