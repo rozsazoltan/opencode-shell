@@ -25,6 +25,8 @@ Shell activation is not required, including in Desktop. Before each supported sh
 
 ## Diagnostics
 
+Use the `opencode_shell_info` tool to check which plugin ID and package version this OpenCode server loaded. It reports the OpenCode version too and performs no subprocess probes. The result identifies the running plugin instance; it does not report a build timestamp.
+
 Diagnostics are silent by default. To opt in to sanitized JSON console records, use:
 
 ```json

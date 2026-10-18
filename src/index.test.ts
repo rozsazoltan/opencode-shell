@@ -81,16 +81,26 @@ function context(debug: unknown = false) {
   let command: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }
   const synthetic = vi.fn()
   const prompt = vi.fn()
-  let tool: { name: string; input: unknown; options: unknown; execute(): Promise<{ content: string }> }
+  const tools: { name: string; input: unknown; options: unknown; execute(): Promise<{ content: string }> }[] = []
   const ctx = {
     options: { debug }, app: { version: "2.0.21" }, location: { directory: "/private-project" },
     shell: { hook: vi.fn((_name, callback) => { hook = callback }) },
     command: { transform: vi.fn((callback) => callback({ add: (definition: typeof command) => { command = definition } })) },
-    tool: { transform: vi.fn((callback) => callback({ add: (definition: typeof tool) => { tool = definition } })) },
+    tool: { transform: vi.fn((callback) => callback({ add: (definition: (typeof tools)[number]) => { tools.push(definition) } })) },
     session: { synthetic, prompt },
   }
-  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: () => command, tool: () => tool }
+  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: () => command, tool: (name = "opencode_shell_diagnostics") => tools.find((item) => item.name === name)! }
 }
+
+describe("plugin info tool", () => {
+  it.each([plugin, devPlugin])("reports loaded identity for $id without probes", async (entry) => {
+    const fixture = context()
+    await entry.setup(fixture.ctx)
+    expect(await fixture.tool("opencode_shell_info").execute()).toEqual({ content: `Plugin: ${entry.id}\nPlugin version: 0.2.1\nOpenCode version: 2.0.21` })
+    expect(calls.run).not.toHaveBeenCalled()
+    expect(calls.access).not.toHaveBeenCalled()
+  })
+})
 
 describe("privacy-safe diagnostics", () => {
   it.each([plugin, devPlugin])("returns the shared sanitized diagnostic report as a tool result for $id", async (entry) => {
