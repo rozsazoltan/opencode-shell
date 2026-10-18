@@ -78,25 +78,33 @@ describe("managed environment resolution", () => {
 
 function context(debug: unknown = false) {
   let hook: (event: ShellCreateBefore) => Promise<void>
-  let command: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }
+  const commands: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }[] = []
   const synthetic = vi.fn()
   const prompt = vi.fn()
   const tools: { name: string; input: unknown; options: unknown; execute(): Promise<{ content: string }> }[] = []
   const ctx = {
     options: { debug }, app: { version: "2.0.21" }, location: { directory: "/private-project" },
     shell: { hook: vi.fn((_name, callback) => { hook = callback }) },
-    command: { transform: vi.fn((callback) => callback({ add: (definition: typeof command) => { command = definition } })) },
+    command: { transform: vi.fn((callback) => callback({ add: (definition: (typeof commands)[number]) => { commands.push(definition) } })) },
     tool: { transform: vi.fn((callback) => callback({ add: (definition: (typeof tools)[number]) => { tools.push(definition) } })) },
     session: { synthetic, prompt },
   }
-  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: () => command, tool: (name = "opencode_shell_diagnostics") => tools.find((item) => item.name === name)! }
+  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: (name = "opencode-shell-diagnostics") => commands.find((item) => item.name === name)!, tool: (name = "opencode_shell_diagnostics") => tools.find((item) => item.name === name)! }
 }
 
 describe("plugin info tool", () => {
   it.each([plugin, devPlugin])("reports loaded identity for $id without probes", async (entry) => {
     const fixture = context()
     await entry.setup(fixture.ctx)
-    expect(await fixture.tool("opencode_shell_info").execute()).toEqual({ content: `Plugin: ${entry.id}\nPlugin version: 0.2.1\nOpenCode version: 2.0.21` })
+    const result = await fixture.tool("opencode_shell_info").execute()
+    expect(result.content).toContain(`Plugin: ${entry.id}\nPlugin version: 0.2.1\nOpenCode version: 2.0.21`)
+    if (entry.id === "opencode-shell-dev") {
+      expect(result.content).toContain("Loaded entry file modified:")
+      expect(result.content).toContain("Workspace commit:")
+    } else {
+      expect(result.content).not.toContain("Loaded entry file modified:")
+      expect(result.content).not.toContain("Workspace commit:")
+    }
     expect(calls.run).not.toHaveBeenCalled()
     expect(calls.access).not.toHaveBeenCalled()
   })
@@ -142,6 +150,17 @@ describe("privacy-safe diagnostics", () => {
       expect(calls.run).not.toHaveBeenCalled()
       expect(calls.access).not.toHaveBeenCalled()
     }
+  })
+
+  it("registers a slash command that asks the agent to invoke the info tool", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const infoCommand = fixture.command("opencode-shell-info")
+    await infoCommand.execute({ sessionID: "session", delivery: "steer" })
+    expect(fixture.prompt).toHaveBeenCalledWith({
+      sessionID: "session", delivery: "steer",
+      text: "Invoke the `opencode_shell_info` tool and display its full result unchanged. Do not perform any additional investigation.",
+    })
   })
 
   it("separates baseline from actual rewrite capability in the tool report", async () => {
