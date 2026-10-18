@@ -267,6 +267,47 @@ describe("mise tool inventory", () => {
     })
     expect(await new InventoryCache().get("/project", {})).toEqual({ status: "unavailable" })
   })
+
+  it("reports empty inventory before context without probing", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const { content } = await fixture.tool("opencode_shell_inventory").execute()
+    expect(content).toContain("No cached inventory")
+    expect(content).toContain("Most recently injected context payload: none")
+    expect(content).toContain("No inventory refresh or subprocess probe was performed")
+    expect(calls.run).not.toHaveBeenCalled()
+  })
+
+  it("reports exact injected payload and cache staleness without refreshing", async () => {
+    inventoryOutput()
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const request = { system: [] as { type: string; text: string }[] }
+    await fixture.contextHook()(request)
+    const exactPayload = request.system.at(-1)!.text
+    const now = Date.now
+    Date.now = () => now() + 61_000
+    try {
+      calls.run.mockClear()
+      const { content } = await fixture.tool("opencode_shell_inventory").execute()
+      expect(content).toContain("Cache snapshot: stale; age 61s; expired, not current evidence")
+      expect(content).toContain(`Most recently injected context payload (available; age 61s; instance-wide, not session-specific):\n${exactPayload}`)
+      expect(content).toContain("not whether any agent read, remembered, or acted on it")
+      expect(calls.run).not.toHaveBeenCalled()
+      expect(content).not.toContain("/secret/path")
+    } finally { Date.now = now }
+  })
+
+  it("slash command requests the inventory tool through the agent flow", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    await fixture.command("opencode-shell-inventory").execute({ sessionID: "session", delivery: "steer" })
+    expect(fixture.prompt).toHaveBeenCalledWith({
+      sessionID: "session", delivery: "steer",
+      text: "Invoke the `opencode_shell_inventory` tool and display its full report unchanged. Do not claim the agent read or remembered injected context. Do not perform any additional investigation.",
+    })
+    expect(calls.run).not.toHaveBeenCalled()
+  })
 })
 
 describe("plugin info tool", () => {
