@@ -63,10 +63,6 @@ Debug logs exclude commands, paths, environment values, and raw errors. Their de
 
 Published versions: [npm](https://www.npmjs.com/package/@rozsazoltan/opencode-shell). Changes: [GitHub Releases](https://github.com/rozsazoltan/opencode-shell/releases).
 
-Maintainers: run **Actions → Release** on `master`, choose `patch`, `minor`, `major`, or `current` (no version bump), then approve the package on [npm](https://www.npmjs.com/settings/rozsazoltan/staged-packages). GitHub Release creation happens after staging, before npm approval.
-
-Only enable `recover_unpublished` with `current` after confirming there is no pending or approved npm stage, published version, or GitHub Release. It can move an unpublished version's tag; if unsure, release a new version instead.
-
 ## Contributing
 
 Use Node 24 and npm to install dependencies and run the existing checks:
