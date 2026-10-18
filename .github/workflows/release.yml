@@ -4,17 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: "SemVer release type used by the prepare run"
+        description: "Bump SemVer, or release the current committed version"
         type: choice
         options:
           - patch
           - minor
           - major
+          - current
         default: patch
-      version:
-        description: "Version to stage; set by the chained stage run (leave empty to prepare)"
-        type: string
-        default: ""
 
 permissions:
   actions: write
@@ -24,7 +21,7 @@ permissions:
 concurrency:
   # Prepare and stage runs use separate groups so a newly queued run can never
   # replace a pending chained stage run.
-  group: release-${{ inputs.version == '' && 'prepare' || 'stage' }}
+  group: release-${{ inputs.release_type == 'current' && 'stage' || 'prepare' }}
   cancel-in-progress: false
 
 jobs:
@@ -46,18 +43,18 @@ jobs:
       - name: Use npm with OIDC support
         run: npm install --global 'npm@^11.15.0'
 
-      # An empty version input prepares a release (bump, commit, tag, dispatch);
-      # a non-empty version input stages that exact version. This is the only switch.
+      # Bump choices prepare a release (bump, commit, tag, dispatch);
+      # current stages the committed version without a version change or commit.
       - name: Determine mode
         id: mode
         env:
-          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ -n "$INPUT_VERSION" ]; then
-            echo 'mode=stage' >> "$GITHUB_OUTPUT"
-          else
-            echo 'mode=prepare' >> "$GITHUB_OUTPUT"
-          fi
+          case "$RELEASE_TYPE" in
+            current) echo 'mode=stage' >> "$GITHUB_OUTPUT" ;;
+            patch | minor | major) echo 'mode=prepare' >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unsupported release type: $RELEASE_TYPE" >&2; exit 1 ;;
+          esac
 
       # ---------------- prepare mode ----------------
 
@@ -174,7 +171,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
-          gh workflow run release.yml --ref master -f version="$VERSION"
+          gh workflow run release.yml --ref master -f release_type=current
           echo "Dispatched the stage run for v$VERSION"
 
       - name: Prepare summary
@@ -198,7 +195,6 @@ jobs:
         if: steps.mode.outputs.mode == 'stage'
         env:
           GH_TOKEN: ${{ github.token }}
-          INPUT_VERSION: ${{ inputs.version }}
         run: |
           test -z "$(git status --porcelain)"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -210,16 +206,13 @@ jobs:
           import { execFileSync } from 'node:child_process'
 
           const packageName = '@rozsazoltan/opencode-shell'
-          const version = process.env.INPUT_VERSION
-          if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
-            throw new Error(`Invalid version input ${version}; expected X.Y.Z`)
-          }
           const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'))
+          const version = manifest.version
           if (manifest.name !== packageName || lock.name !== packageName ||
               lock.packages?.['']?.name !== packageName ||
-              manifest.version !== version || lock.version !== version || lock.packages?.['']?.version !== version) {
-            throw new Error('Package name/version does not match the requested version and lockfile')
+              lock.version !== version || lock.packages?.['']?.version !== version) {
+            throw new Error('Package name/version does not match the lockfile')
           }
           const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-versions.json`, 'utf8'))
           const versions = new Set(Array.isArray(published) ? published : [published])
@@ -253,14 +246,21 @@ jobs:
           if (bootstrap.name !== packageName || bootstrap.version !== '0.1.0') {
             throw new Error('Bootstrap tag does not point to the published package version')
           }
-          // The prepare run owns tag creation; the stage run only verifies the tag
-          // points at the exact source commit it is about to attest.
-          if (!tags.includes(tag)) {
-            throw new Error(`Missing tag ${tag}; the prepare run must create it first`)
+          // Existing tags must point at the exact source commit about to be attested.
+          // A current run may create a missing tag, but never move an existing one.
+          const tagExists = tags.includes(tag)
+          const remoteTag = execFileSync('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`], { encoding: 'utf8' }).trim()
+          const localTag = tagExists
+            ? execFileSync('git', ['rev-parse', `refs/tags/${tag}`], { encoding: 'utf8' }).trim()
+            : undefined
+          if (remoteTag !== (tagExists ? `${localTag}\trefs/tags/${tag}` : '')) {
+            throw new Error(`Remote tag ${tag} differs from checkout; refusing to create or replace it`)
           }
-          const tagCommit = execFileSync('git', ['rev-list', '-n', '1', tag], { encoding: 'utf8' }).trim()
-          if (tagCommit !== process.env.GITHUB_SHA) {
-            throw new Error(`${tag} does not point to the workflow SHA; refusing to stage a different source commit`)
+          if (tagExists) {
+            const tagCommit = execFileSync('git', ['rev-list', '-n', '1', tag], { encoding: 'utf8' }).trim()
+            if (tagCommit !== process.env.GITHUB_SHA) {
+              throw new Error(`${tag} does not point to the workflow SHA; refusing to stage a different source commit. Select a bump release type to release newer master changes without moving the tag`)
+            }
           }
           if (compare(parseTag(tag), parseTag(latest)) < 0 ||
               compare(parseTag(tag), npmLatestVersion) < 0) {
@@ -278,11 +278,16 @@ jobs:
             throw new Error(`Could not verify GitHub Release for ${tag}`)
           }
           const releaseExists = releaseResponse.data.repository.release !== null
+          if (!tagExists && (releaseExists || versions.has(version))) {
+            throw new Error(`Missing tag ${tag} for an existing release or published version; manual recovery required`)
+          }
           // Only public registry publication is evidence for repair without staging.
           // A reserved staged version or an existing Release is not such evidence.
+          // npm OIDC tokens cannot list/view stages; an unknown stage is not skipped.
           const action = versions.has(version) ? (releaseExists ? 'complete' : 'repair-release') : 'stage'
-          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\ntag=${tag}\nrelease_exists=${releaseExists}\n`)
+          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\ntag=${tag}\nrelease_exists=${releaseExists}\ntag_exists=${tagExists}\n`)
           console.log(`${action}: ${version}`)
+          if (action === 'stage') console.log('Not publicly published; existing npm stage status cannot be checked with OIDC. Staging errors will fail this run.')
           NODE
 
       - name: Install and check package
@@ -292,11 +297,22 @@ jobs:
           npm run typecheck
           npm test
 
-      - name: Pack existing tagged version
+      - name: Pack current version
         if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage'
         run: |
           npm run build --if-present
           npm pack --dry-run
+
+      - name: Tag current version if missing
+        if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage' && steps.preflight.outputs.tag_exists == 'false'
+        env:
+          TAG: ${{ steps.preflight.outputs.tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" "$GITHUB_SHA" -m "$TAG"
+          git push origin "refs/tags/$TAG"
 
       - name: Stage package for npm approval
         if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage'
