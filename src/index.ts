@@ -1,4 +1,6 @@
-import { execFile } from "node:child_process"
+import { execFile, execFileSync } from "node:child_process"
+import { stat } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { ShellCreateBefore } from "@opencode/plugin/promise/shell"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -94,8 +96,35 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
       options: { permission: "opencode_shell_diagnostics" },
       async execute() { return { content: await report() } },
     })
+    editor.add({
+      name: "opencode_shell_info",
+      description: "Return the loaded opencode-shell plugin identity and runtime versions without probing executables or exposing environment data",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      options: { permission: "opencode_shell_info" },
+      async execute() {
+        const details = [`Plugin: ${id}`, `Plugin version: ${manifest.version}`, `OpenCode version: ${ctx.app.version}`]
+        if (id === "opencode-shell-dev") {
+          try {
+            const modifiedAt = await stat(fileURLToPath(import.meta.url)).then((file) => file.mtime.toISOString())
+            details.push(`Loaded entry file modified: ${modifiedAt}`)
+          } catch { details.push("Loaded entry file modified: unavailable") }
+          try {
+            const commit = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ctx.location.directory, encoding: "utf8", timeout: 1000, windowsHide: true }).trim()
+            details.push(`Workspace commit: ${/^[0-9a-f]{7,40}$/i.test(commit) ? commit : "unavailable"}`)
+          } catch { details.push("Workspace commit: unavailable") }
+        }
+        return { content: details.join("\n") }
+      },
+    })
   })
   await ctx.command.transform((editor) => {
+    editor.add({
+      name: "opencode-shell-info",
+      description: "Ask the agent to report the loaded opencode-shell plugin ID and version",
+      async execute({ sessionID, delivery }) {
+        await ctx.session.prompt({ sessionID, delivery, text: "Invoke the `opencode_shell_info` tool and display its full result unchanged. Do not perform any additional investigation." })
+      },
+    })
     editor.add({
       name: "opencode-shell-diagnostics",
       description: "Ask the agent to invoke managed-environment mise/RTK diagnostics (trusted mise config may run hooks)",

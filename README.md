@@ -25,6 +25,8 @@ Shell activation is not required, including in Desktop. Before each supported sh
 
 ## Diagnostics
 
+Use `/opencode-shell-info` to ask the agent to call `opencode_shell_info` and report which plugin ID and package version this server loaded. It reports the OpenCode version too and performs no subprocess probes. For the dev plugin it also reports the entry file's modification time and current workspace commit; these do not prove that loaded code matches the current worktree when the file changed after loading. It does not report a build timestamp.
+
 Diagnostics are silent by default. To opt in to sanitized JSON console records, use:
 
 ```json
