@@ -12,6 +12,7 @@ import { managedEnvironment, mergeEnvironment } from "./environment"
 import { InventoryCache, parseInventory } from "./inventory"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import manifest from "../package.json"
 
 function event(command = "git status", shell = "/bin/bash"): ShellCreateBefore {
   return { command, shell, cwd: "/project", env: { PATH: "/external", KEEP: "yes" }, timeout: 10000 }
@@ -315,7 +316,7 @@ describe("plugin info tool", () => {
     const fixture = context()
     await entry.setup(fixture.ctx)
     const result = await fixture.tool("opencode_shell_info").execute()
-    expect(result.content).toContain(`Plugin: ${entry.id}\nPlugin version: 0.2.1\nOpenCode version: 2.0.21`)
+    expect(result.content).toContain(`Plugin: ${entry.id}\nPlugin version: ${manifest.version}\nOpenCode version: 2.0.21`)
     if (entry.id === "opencode-shell-dev") {
       expect(result.content).toContain("Loaded entry file modified:")
       expect(result.content).toContain("Workspace commit:")
