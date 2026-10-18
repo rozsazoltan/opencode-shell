@@ -12,6 +12,10 @@ on:
           - major
           - current
         default: patch
+      recover_unpublished:
+        description: "current only: replace an old tag; I verified NO pending/approved npm stage, published version, or GitHub Release"
+        type: boolean
+        default: false
 
 permissions:
   actions: write
@@ -49,7 +53,13 @@ jobs:
         id: mode
         env:
           RELEASE_TYPE: ${{ inputs.release_type }}
+          RECOVER_UNPUBLISHED: ${{ inputs.recover_unpublished }}
         run: |
+          case "$RECOVER_UNPUBLISHED" in
+            true) test "$RELEASE_TYPE" = current ;;
+            false) ;;
+            *) echo 'Invalid recovery confirmation' >&2; exit 1 ;;
+          esac
           case "$RELEASE_TYPE" in
             current) echo 'mode=stage' >> "$GITHUB_OUTPUT" ;;
             patch | minor | major) echo 'mode=prepare' >> "$GITHUB_OUTPUT" ;;
@@ -195,6 +205,7 @@ jobs:
         if: steps.mode.outputs.mode == 'stage'
         env:
           GH_TOKEN: ${{ github.token }}
+          RECOVER_UNPUBLISHED: ${{ inputs.recover_unpublished }}
         run: |
           test -z "$(git status --porcelain)"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -215,6 +226,9 @@ jobs:
             throw new Error('Package name/version does not match the lockfile')
           }
           const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-versions.json`, 'utf8'))
+          if (!(Array.isArray(published) ? published : [published]).every(value => typeof value === 'string' && value.length > 0)) {
+            throw new Error('Could not verify public npm versions')
+          }
           const versions = new Set(Array.isArray(published) ? published : [published])
           if (!versions.size) throw new Error('Publish the bootstrap package locally first')
           const npmLatest = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-latest.json`, 'utf8'))
@@ -246,8 +260,9 @@ jobs:
           if (bootstrap.name !== packageName || bootstrap.version !== '0.1.0') {
             throw new Error('Bootstrap tag does not point to the published package version')
           }
-          // Existing tags must point at the exact source commit about to be attested.
-          // A current run may create a missing tag, but never move an existing one.
+          // Existing tags must identify the exact source about to be attested.
+          // Only explicit unpublished recovery may replace an older ancestor tag.
+          const recover = process.env.RECOVER_UNPUBLISHED === 'true'
           const tagExists = tags.includes(tag)
           const remoteTag = execFileSync('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`], { encoding: 'utf8' }).trim()
           const localTag = tagExists
@@ -256,10 +271,16 @@ jobs:
           if (remoteTag !== (tagExists ? `${localTag}\trefs/tags/${tag}` : '')) {
             throw new Error(`Remote tag ${tag} differs from checkout; refusing to create or replace it`)
           }
+          const tagCommit = tagExists
+            ? execFileSync('git', ['rev-parse', `${tag}^{commit}`], { encoding: 'utf8' }).trim()
+            : undefined
           if (tagExists) {
-            const tagCommit = execFileSync('git', ['rev-list', '-n', '1', tag], { encoding: 'utf8' }).trim()
-            if (tagCommit !== process.env.GITHUB_SHA) {
-              throw new Error(`${tag} does not point to the workflow SHA; refusing to stage a different source commit. Select a bump release type to release newer master changes without moving the tag`)
+            const taggedManifest = JSON.parse(execFileSync('git', ['show', `${tag}:package.json`], { encoding: 'utf8' }))
+            const taggedLock = JSON.parse(execFileSync('git', ['show', `${tag}:package-lock.json`], { encoding: 'utf8' }))
+            if (taggedManifest.name !== packageName || taggedManifest.version !== version ||
+                taggedLock.name !== packageName || taggedLock.version !== version ||
+                taggedLock.packages?.['']?.name !== packageName || taggedLock.packages?.['']?.version !== version) {
+              throw new Error(`Tag ${tag} does not identify the same package/version and consistent lockfile`)
             }
           }
           if (compare(parseTag(tag), parseTag(latest)) < 0 ||
@@ -278,6 +299,9 @@ jobs:
             throw new Error(`Could not verify GitHub Release for ${tag}`)
           }
           const releaseExists = releaseResponse.data.repository.release !== null
+          if (recover && (releaseExists || versions.has(version))) {
+            throw new Error('Unpublished recovery refuses any existing GitHub Release or publicly published npm version')
+          }
           if (!tagExists && (releaseExists || versions.has(version))) {
             throw new Error(`Missing tag ${tag} for an existing release or published version; manual recovery required`)
           }
@@ -285,7 +309,16 @@ jobs:
           // A reserved staged version or an existing Release is not such evidence.
           // npm OIDC tokens cannot list/view stages; an unknown stage is not skipped.
           const action = versions.has(version) ? (releaseExists ? 'complete' : 'repair-release') : 'stage'
-          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\ntag=${tag}\nrelease_exists=${releaseExists}\ntag_exists=${tagExists}\n`)
+          let tagAction = tagExists ? 'none' : 'create'
+          if (action === 'stage' && tagExists && tagCommit !== process.env.GITHUB_SHA) {
+            if (!recover) {
+              throw new Error(`${tag} does not point to the workflow SHA; choose a bump or explicitly confirm unpublished recovery after checking npm stages manually`)
+            }
+            execFileSync('git', ['merge-base', '--is-ancestor', tagCommit, process.env.GITHUB_SHA])
+            tagAction = 'replace'
+          }
+          // Published retries never stage or move tags, even if master has advanced.
+          appendFileSync(process.env.GITHUB_OUTPUT, `action=${action}\ntag=${tag}\nrelease_exists=${releaseExists}\ntag_action=${tagAction}\nexpected_tag=${localTag ?? ''}\n`)
           console.log(`${action}: ${version}`)
           if (action === 'stage') console.log('Not publicly published; existing npm stage status cannot be checked with OIDC. Staging errors will fail this run.')
           NODE
@@ -303,20 +336,70 @@ jobs:
           npm run build --if-present
           npm pack --dry-run
 
-      - name: Tag current version if missing
-        if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage' && steps.preflight.outputs.tag_exists == 'false'
+      - name: Create or recover unpublished version tag
+        if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage' && steps.preflight.outputs.tag_action != 'none'
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.preflight.outputs.tag }}
+          TAG_ACTION: ${{ steps.preflight.outputs.tag_action }}
+          EXPECTED_TAG: ${{ steps.preflight.outputs.expected_tag }}
+          RECOVER_UNPUBLISHED: ${{ inputs.recover_unpublished }}
         run: |
+          test -z "$(git status --porcelain)"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git ls-remote origin refs/heads/master | cut -f1)"
+          case "$TAG_ACTION" in
+            create) test -z "$EXPECTED_TAG" ;;
+            replace)
+              test "$RECOVER_UNPUBLISHED" = true
+              test -n "$EXPECTED_TAG"
+              test "$(git rev-parse "refs/tags/$TAG")" = "$EXPECTED_TAG"
+              git merge-base --is-ancestor "$TAG^{commit}" "$GITHUB_SHA"
+              ;;
+            *) echo 'Invalid tag action' >&2; exit 1 ;;
+          esac
+          # Recheck public state after checks/packing, just before changing any tag.
+          # npm stage absence is the operator's explicit confirmation, never inferred.
+          npm view @rozsazoltan/opencode-shell versions --json > "$RUNNER_TEMP/npm-versions.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+
+          const tag = process.env.TAG
+          const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/npm-versions.json`, 'utf8'))
+          const versions = Array.isArray(published) ? published : [published]
+          if (!versions.length || !versions.every(value => typeof value === 'string' && value.length > 0) || !versions.includes('0.1.0')) {
+            throw new Error('Could not verify public npm versions')
+          }
+          if (versions.includes(tag.slice(1))) throw new Error('Version became publicly published; refusing to change its tag')
+          const response = JSON.parse(execFileSync('gh', [
+            'api', 'graphql',
+            '-f', 'query=query($owner:String!,$repo:String!,$tag:String!){repository(owner:$owner,name:$repo){release(tagName:$tag){tagName}}}',
+            '-f', 'owner=rozsazoltan', '-f', 'repo=opencode-shell', '-f', `tag=${tag}`,
+          ], { encoding: 'utf8' }))
+          if (response.errors?.length || !response.data?.repository || response.data.repository.release !== null) {
+            throw new Error('GitHub Release exists or could not be checked; refusing to change its tag')
+          }
+          NODE
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a "$TAG" "$GITHUB_SHA" -m "$TAG"
-          git push origin "refs/tags/$TAG"
+          if [ "$TAG_ACTION" = replace ]; then
+            git tag -f -a "$TAG" "$GITHUB_SHA" -m "$TAG"
+          else
+            git tag -a "$TAG" "$GITHUB_SHA" -m "$TAG"
+          fi
+          git push --atomic --force-with-lease="refs/tags/$TAG:$EXPECTED_TAG" origin "refs/tags/$TAG:refs/tags/$TAG"
 
       - name: Stage package for npm approval
         if: steps.mode.outputs.mode == 'stage' && steps.preflight.outputs.action == 'stage'
+        env:
+          TAG: ${{ steps.preflight.outputs.tag }}
         run: |
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git ls-remote origin refs/heads/master | cut -f1)"
+          test "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA"
+          test "$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)" = "$(git rev-parse "refs/tags/$TAG")"
           npm stage publish --provenance --access public --tag latest
           echo 'Approve this staged package at https://www.npmjs.com/settings/rozsazoltan/staged-packages'
 
