@@ -100,6 +100,15 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
       options: { permission: "opencode_shell_diagnostics" },
       async execute() { return { content: await report() } },
     })
+    editor.add({
+      name: "opencode_shell_info",
+      description: "Return the loaded opencode-shell plugin identity and runtime versions without probing executables or exposing environment data",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      options: { permission: "opencode_shell_info" },
+      async execute() {
+        return { content: [`Plugin: ${id}`, `Plugin version: ${manifest.version}`, `OpenCode version: ${ctx.app.version}`].join("\n") }
+      },
+    })
   })
   await ctx.command.transform((editor) => {
     editor.add({
