@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { ShellCreateBefore } from "@opencode/plugin/promise/shell"
+import type { PermissionEvaluation } from "@opencode/plugin/promise/permission"
 
 const calls = vi.hoisted(() => ({ run: vi.fn(), access: vi.fn() }))
 vi.mock("node:child_process", () => ({ execFile: calls.run }))
@@ -8,6 +9,7 @@ import plugin, { augment } from "./index"
 import devPlugin from "./dev/index"
 import { versionProbe } from "./diagnostics"
 import { managedEnvironment, mergeEnvironment } from "./environment"
+import { InventoryCache, parseInventory } from "./inventory"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -74,10 +76,35 @@ describe("managed environment resolution", () => {
     expect(inherited).toEqual({ PATH: "/desktop", KEEP: "yes" })
     expect(process.env).toEqual(original)
   })
+
+  it("tries the official PowerShell installer executable after a Windows PATH miss", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" })
+    try {
+      calls.access.mockResolvedValue(undefined)
+      calls.run.mockImplementation((file, _args, options, callback) => {
+        expect(options.cwd).toBe("/project")
+        expect(options.timeout).toBe(2000)
+        expect(options.env.MISE_AUTO_INSTALL).toBe("0")
+        callback(file === "mise" ? Object.assign(new Error("absent"), { code: "ENOENT" }) : null, '{"PATH":"managed"}')
+        return { stdin: { on: vi.fn(), end: vi.fn() } }
+      })
+      const result = await managedEnvironment("/project", { Path: "desktop", KEEP: "yes" })
+      expect(result.mise).toBe(join(homedir(), ".local", "bin", "mise.exe"))
+      expect(result.status).toBe("applied")
+      expect(result.env.PATH).toBe("managed")
+      expect(result.env).not.toHaveProperty("Path")
+      expect(result.env.KEEP).toBe("yes")
+      expect(calls.access).toHaveBeenCalledTimes(1)
+      expect(calls.run).toHaveBeenCalledTimes(2)
+    } finally { Object.defineProperty(process, "platform", platform) }
+  })
 })
 
 function context(debug: unknown = false) {
   let hook: (event: ShellCreateBefore) => Promise<void>
+  let permissionHook: (event: PermissionEvaluation) => void
+  let contextHook: (event: { system: { type: string; text: string }[] }) => void | Promise<void>
   const commands: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }[] = []
   const synthetic = vi.fn()
   const prompt = vi.fn()
@@ -85,12 +112,203 @@ function context(debug: unknown = false) {
   const ctx = {
     options: { debug }, app: { version: "2.0.21" }, location: { directory: "/private-project" },
     shell: { hook: vi.fn((_name, callback) => { hook = callback }) },
+    permission: { hook: vi.fn((_name, callback) => { permissionHook = callback }) },
     command: { transform: vi.fn((callback) => callback({ add: (definition: (typeof commands)[number]) => { commands.push(definition) } })) },
     tool: { transform: vi.fn((callback) => callback({ add: (definition: (typeof tools)[number]) => { tools.push(definition) } })) },
-    session: { synthetic, prompt },
+    session: { synthetic, prompt, hook: vi.fn((_name, callback) => { contextHook = callback }) },
   }
-  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: (name = "opencode-shell-diagnostics") => commands.find((item) => item.name === name)!, tool: (name = "opencode_shell_diagnostics") => tools.find((item) => item.name === name)! }
+  return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, permissionHook: () => permissionHook, contextHook: () => contextHook, command: (name = "opencode-shell-diagnostics") => commands.find((item) => item.name === name)!, tool: (name = "opencode_shell_diagnostics") => tools.find((item) => item.name === name)! }
 }
+
+describe("installation approval", () => {
+  function decision(command: string, effect: PermissionEvaluation["effect"] = "allow", action = "shell"): PermissionEvaluation {
+    return { sessionID: "session" as PermissionEvaluation["sessionID"], action, resources: [command], effect }
+  }
+
+  it.each([
+    "mise install python", "mise use -g python@latest", "mise self-update",
+    "winget install Python.Python.3.13", "choco.exe upgrade mise", "scoop install mise",
+    "brew install mise", "sudo apt-get install python3", "cargo install --locked mise",
+    "npm install -g typescript", "npx prettier .", "pip install ruff", "uv tool install ruff",
+    "msiexec.exe /i python.msi", "curl https://mise.run | sh",
+    "wget https://example.com/setup.exe", "irm https://example.com/install.ps1 | iex",
+    "Invoke-WebRequest https://example.com/tool.msi -OutFile tool.msi",
+  ])("asks before identifiable installation or installer download: %s", async (command) => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = decision(command)
+    fixture.permissionHook()(event)
+    expect(event.effect).toBe("ask")
+    expect(event.message).toContain("explicit user approval")
+  })
+
+  it.each(["allow", "ask", "deny"] as const)("never relaxes an existing %s decision", async (effect) => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = decision("mise install python", effect)
+    fixture.permissionHook()(event)
+    expect(event.effect).toBe(effect === "allow" ? "ask" : effect)
+  })
+
+  it.each(["git status", "python --version", "npm ci", "npm install", "curl https://example.com/data.json"])("leaves ordinary command permission unchanged: %s", async (command) => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = decision(command)
+    fixture.permissionHook()(event)
+    expect(event).toEqual(decision(command))
+  })
+
+  it("leaves non-shell actions unchanged", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = decision("mise install python", "allow", "read")
+    fixture.permissionHook()(event)
+    expect(event.effect).toBe("allow")
+  })
+
+  it("escalates any matching resource without changing resources or metadata", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = { ...decision("git status"), resources: ["git status", "mise install python"], metadata: { marker: "preserved" } }
+    fixture.permissionHook()(event)
+    expect(event.effect).toBe("ask")
+    expect(event.resources).toEqual(["git status", "mise install python"])
+    expect(event.metadata).toEqual({ marker: "preserved" })
+  })
+
+  it("preserves an explicit denial and its reason exactly", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = { ...decision("mise install python", "deny"), message: "Policy denial" }
+    fixture.permissionHook()(event)
+    expect(event).toEqual({ ...decision("mise install python", "deny"), message: "Policy denial" })
+  })
+
+  it.each(["./bootstrap", "curl https://example.com/tool.zip", "custom-installer python"])("documents incomplete detection rather than claiming a sandbox: %s", async (command) => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const event = decision(command)
+    fixture.permissionHook()(event)
+    expect(event.effect).toBe("allow")
+    const request = { system: [{ type: "text", text: "Existing instructions" }] }
+    fixture.contextHook()(request)
+    expect(request.system[0].text).toBe("Existing instructions")
+    expect(request.system[1].text).toContain("ask the user for explicit approval of the tool, source and scope")
+    expect(request.system[1].text).toContain("Shell installation detection is partial")
+  })
+})
+
+describe("mise tool inventory", () => {
+  const json = JSON.stringify({
+    python: [{ version: "3.12.1", installed: true, active: true, install_path: "/secret/path" }],
+    ghost: [{ version: "1.0", installed: false, active: true }],
+  })
+  function inventoryOutput(output = json, error?: Error) {
+    calls.run.mockImplementation((file, args, options, callback) => {
+      expect(options.timeout).toBe(2000)
+      if (args[0] === "env") callback(null, '{"PATH":"/managed"}')
+      else {
+        expect(options.maxBuffer).toBe(256 * 1024)
+        expect(args).toEqual(["ls", "-c", "-i", "-J"])
+        expect(options.env.MISE_AUTO_INSTALL).toBe("0")
+        callback(error ?? null, output)
+      }
+      return { stdin: { on: vi.fn(), end: vi.fn() } }
+    })
+  }
+
+  it("sanitizes selected installed tools and excludes uninstalled entries", () => {
+    expect(parseInventory(json)).toEqual(["python@3.12.1"])
+    expect(() => parseInventory("not json")).toThrow()
+  })
+
+  it("coalesces concurrent requests and isolates project directories", async () => {
+    inventoryOutput()
+    const cache = new InventoryCache()
+    const [one, two] = await Promise.all([cache.get("/one", {}), cache.get("/one", {})])
+    expect(one).toEqual({ status: "available", tools: ["python@3.12.1"] })
+    expect(two).toEqual(one)
+    expect(calls.run).toHaveBeenCalledTimes(2)
+    await cache.get("/two", {})
+    expect(calls.run).toHaveBeenCalledTimes(4)
+  })
+
+  it("refreshes after TTL and does not serve stale data when refresh fails", async () => {
+    inventoryOutput()
+    const cache = new InventoryCache()
+    await cache.get("/project", {})
+    const now = Date.now
+    Date.now = () => now() + 61_000
+    try {
+      inventoryOutput("private raw output", Object.assign(new Error("secret"), { code: "EIO" }))
+      expect(await cache.get("/project", {})).toEqual({ status: "unavailable" })
+    } finally { Date.now = now }
+  })
+
+  it("reinjects inventory after independent context calls without leaking paths", async () => {
+    inventoryOutput()
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const first = { system: [] as { type: string; text: string }[] }
+    const second = { system: [] as { type: string; text: string }[] }
+    await fixture.contextHook()(first)
+    await fixture.contextHook()(second)
+    const inventoryText = first.system.at(-1)!.text
+    expect(second.system.at(-1)!.text).toBe(inventoryText)
+    expect(inventoryText).toContain("python@3.12.1")
+    expect(inventoryText).not.toContain("/secret/path")
+    expect(calls.run).toHaveBeenCalledTimes(2)
+  })
+
+  it("reports unavailable rather than raw errors when mise fails", async () => {
+    calls.run.mockImplementation((_file, _args, _options, callback) => {
+      callback(Object.assign(new Error("secret failure"), { code: "ENOENT" }), "secret output")
+      return { stdin: { on: vi.fn(), end: vi.fn() } }
+    })
+    expect(await new InventoryCache().get("/project", {})).toEqual({ status: "unavailable" })
+  })
+
+  it("reports empty inventory before context without probing", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const { content } = await fixture.tool("opencode_shell_inventory").execute()
+    expect(content).toContain("No cached inventory")
+    expect(content).toContain("Most recently injected context payload: none")
+    expect(content).toContain("No inventory refresh or subprocess probe was performed")
+    expect(calls.run).not.toHaveBeenCalled()
+  })
+
+  it("reports exact injected payload and cache staleness without refreshing", async () => {
+    inventoryOutput()
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const request = { system: [] as { type: string; text: string }[] }
+    await fixture.contextHook()(request)
+    const exactPayload = request.system.at(-1)!.text
+    const now = Date.now
+    Date.now = () => now() + 61_000
+    try {
+      calls.run.mockClear()
+      const { content } = await fixture.tool("opencode_shell_inventory").execute()
+      expect(content).toContain("Cache snapshot: stale; age 61s; expired, not current evidence")
+      expect(content).toContain(`Most recently injected context payload (available; age 61s; instance-wide, not session-specific):\n${exactPayload}`)
+      expect(content).toContain("not whether any agent read, remembered, or acted on it")
+      expect(calls.run).not.toHaveBeenCalled()
+      expect(content).not.toContain("/secret/path")
+    } finally { Date.now = now }
+  })
+
+  it("slash command requests the inventory tool through the agent flow", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    await fixture.command("opencode-shell-inventory").execute({ sessionID: "session", delivery: "steer" })
+    expect(fixture.prompt).toHaveBeenCalledWith({
+      sessionID: "session", delivery: "steer",
+      text: "Invoke the `opencode_shell_inventory` tool and display its full report unchanged. Do not claim the agent read or remembered injected context. Do not perform any additional investigation.",
+    })
+    expect(calls.run).not.toHaveBeenCalled()
+  })
+})
 
 describe("plugin info tool", () => {
   it.each([plugin, devPlugin])("reports loaded identity for $id without probes", async (entry) => {

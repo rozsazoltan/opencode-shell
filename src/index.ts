@@ -7,6 +7,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { hookSummary, observe, probeFailure, versionProbe, type Observe, type Outcome, type ProbeFailure } from "./diagnostics"
 import manifest from "../package.json"
 import { managedEnvironment, type Environment } from "./environment"
+import { formatInventory, InventoryCache } from "./inventory"
 
 type ProbeResult<T> = { status: "ok"; value: T } | { status: ProbeFailure }
 
@@ -60,6 +61,27 @@ export async function augment(event: ShellCreateBefore, observer?: Observe): Pro
 
 export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> {
   const debug = ctx.options.debug === true
+  // The host scanner supplies command resources, not a complete shell AST.
+  // Escalate identifiable installations only; never relax existing permissions.
+  await ctx.permission.hook("evaluate", (event) => {
+    if (event.action !== "shell" || event.effect === "deny") return
+    const installation = event.resources.some((command) =>
+      /\b(?:mise(?:\.exe)?\s+(?:install|use|upgrade|self-update)|(?:winget|choco|scoop|brew|packslip)(?:\.exe)?\s+(?:install|upgrade)|(?:apt(?:-get)?|dnf|yum|apk|zypper)\s+(?:[^;&|\n]*\s)?install|cargo\s+(?:install|binstall)|(?:npm|pnpm|yarn)\s+(?:[^;&|\n]*\s)?(?:--global|-g)\b|(?:pip\d*|pipx|uv)\s+(?:tool\s+)?install|(?:npx|bunx)\s|msiexec(?:\.exe)?\s)/i.test(command)
+      || /\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^\n]*(?:\.(?:msi|exe|ps1|sh)\b|mise\.run|install\.[a-z]|\|\s*(?:sh|bash|iex|Invoke-Expression)\b)/i.test(command),
+    )
+    if (!installation) return
+    event.effect = "ask"
+    event.message = "Tool installation or installer download detected. Obtain explicit user approval before proceeding."
+  })
+  const inventory = new InventoryCache()
+  let lastInventoryContext: { text: string; status: "available" | "unavailable"; injectedAt: number } | undefined
+  await ctx.session.hook("context", async (event) => {
+    event.system.push({ type: "text", text: "Before installing or upgrading tools, running package runners that may download tools, or downloading standalone installers, ask the user for explicit approval of the tool, source and scope. Do not treat a missing executable as permission to install it. Project dependency operations are not blanket permission to install system/global tools. Shell installation detection is partial; obfuscated commands, scripts, alternate tools and downloads may not be detected. Preserve normal host permissions and never auto-approve requests." })
+    const result = await inventory.get(ctx.location.directory, process.env)
+    const text = formatInventory(result)
+    lastInventoryContext = { text, status: result.status, injectedAt: Date.now() }
+    event.system.push({ type: "text", text })
+  })
   let last: Outcome[] = []
   const log = (record: object) => {
     if (debug) {
@@ -116,6 +138,23 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
         return { content: details.join("\n") }
       },
     })
+    editor.add({
+      name: "opencode_shell_inventory",
+      description: "Report cached mise inventory and last injected context payload without refreshing or probing the environment",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      options: { permission: "opencode_shell_inventory" },
+      async execute() {
+        const cache = inventory.inspect(ctx.location.directory)
+        const age = (milliseconds: number) => `${Math.floor(milliseconds / 1000)}s`
+        const cacheDescription = cache.status === "empty"
+          ? "No cached inventory; no successful context inventory refresh has completed."
+          : `Cache snapshot: ${cache.status}; age ${age(cache.ageMs!)}${cache.status === "stale" ? "; expired, not current evidence" : "; within 60-second TTL"}. ${cache.tools!.length ? cache.tools!.join(", ") : "none reported"}.`
+        const contextDescription = lastInventoryContext
+          ? `Most recently injected context payload (${lastInventoryContext.status}; age ${age(Date.now() - lastInventoryContext.injectedAt)}; instance-wide, not session-specific):\n${lastInventoryContext.text}`
+          : "Most recently injected context payload: none; no context request has completed."
+        return { content: [`Inventory scope: plugin location; session cwd is unavailable through the supported context event.`, cacheDescription, contextDescription, "This reports injected context, not whether any agent read, remembered, or acted on it. No inventory refresh or subprocess probe was performed."].join("\n") }
+      },
+    })
   })
   await ctx.command.transform((editor) => {
     editor.add({
@@ -130,6 +169,13 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
       description: "Ask the agent to invoke managed-environment mise/RTK diagnostics (trusted mise config may run hooks)",
       async execute({ sessionID, delivery }) {
         await ctx.session.prompt({ sessionID, delivery, text: "Invoke the `opencode_shell_diagnostics` tool and display its full report unchanged. Then briefly conclude from the report whether mise environment loading and RTK availability/rewriting work, explicitly distinguishing observed results from unmeasured command execution and RTK gain/tracking. Do not perform any additional investigation." })
+      },
+    })
+    editor.add({
+      name: "opencode-shell-inventory",
+      description: "Ask the agent to report cached mise inventory and the last injected context payload",
+      async execute({ sessionID, delivery }) {
+        await ctx.session.prompt({ sessionID, delivery, text: "Invoke the `opencode_shell_inventory` tool and display its full report unchanged. Do not claim the agent read or remembered injected context. Do not perform any additional investigation." })
       },
     })
   })
