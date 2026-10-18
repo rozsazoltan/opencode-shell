@@ -35,10 +35,10 @@ export async function managedEnvironment(cwd: string, inherited: Environment): P
   })
   let mise = "mise"
   let result = await capture(mise)
-  // The official Unix installer uses this one fixed location. Windows package
-  // managers have no single documented install path; use PATH there.
-  if ("failure" in result && result.failure === "not_found" && process.platform !== "win32") {
-    const candidate = join(homedir(), ".local", "bin", "mise")
+  // Official Unix and PowerShell installers use this fixed location. Do not
+  // search package-manager directories or execute shell profiles for discovery.
+  if ("failure" in result && result.failure === "not_found") {
+    const candidate = join(homedir(), ".local", "bin", process.platform === "win32" ? "mise.exe" : "mise")
     try {
       await access(candidate, constants.X_OK)
       mise = candidate

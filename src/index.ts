@@ -60,6 +60,21 @@ export async function augment(event: ShellCreateBefore, observer?: Observe): Pro
 
 export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> {
   const debug = ctx.options.debug === true
+  // The host scanner supplies command resources, not a complete shell AST.
+  // Escalate identifiable installations only; never relax existing permissions.
+  await ctx.permission.hook("evaluate", (event) => {
+    if (event.action !== "shell" || event.effect === "deny") return
+    const installation = event.resources.some((command) =>
+      /\b(?:mise(?:\.exe)?\s+(?:install|use|upgrade|self-update)|(?:winget|choco|scoop|brew|packslip)(?:\.exe)?\s+(?:install|upgrade)|(?:apt(?:-get)?|dnf|yum|apk|zypper)\s+(?:[^;&|\n]*\s)?install|cargo\s+(?:install|binstall)|(?:npm|pnpm|yarn)\s+(?:[^;&|\n]*\s)?(?:--global|-g)\b|(?:pip\d*|pipx|uv)\s+(?:tool\s+)?install|(?:npx|bunx)\s|msiexec(?:\.exe)?\s)/i.test(command)
+      || /\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^\n]*(?:\.(?:msi|exe|ps1|sh)\b|mise\.run|install\.[a-z]|\|\s*(?:sh|bash|iex|Invoke-Expression)\b)/i.test(command),
+    )
+    if (!installation) return
+    event.effect = "ask"
+    event.message = "Tool installation or installer download detected. Obtain explicit user approval before proceeding."
+  })
+  await ctx.session.hook("context", (event) => {
+    event.system.push({ type: "text", text: "Before installing or upgrading tools, running package runners that may download tools, or downloading standalone installers, ask the user for explicit approval of the tool, source and scope. Do not treat a missing executable as permission to install it. Project dependency operations are not blanket permission to install system/global tools. Shell installation detection is partial; obfuscated commands, scripts, alternate tools and downloads may not be detected. Preserve normal host permissions and never auto-approve requests." })
+  })
   let last: Outcome[] = []
   const log = (record: object) => {
     if (debug) {
