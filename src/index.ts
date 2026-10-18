@@ -7,6 +7,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { hookSummary, observe, probeFailure, versionProbe, type Observe, type Outcome, type ProbeFailure } from "./diagnostics"
 import manifest from "../package.json"
 import { managedEnvironment, type Environment } from "./environment"
+import { registerFilterWorkflow } from "./filter-workflow"
 
 type ProbeResult<T> = { status: "ok"; value: T } | { status: ProbeFailure }
 
@@ -60,6 +61,7 @@ export async function augment(event: ShellCreateBefore, observer?: Observe): Pro
 
 export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> {
   const debug = ctx.options.debug === true
+  if (ctx.options.filterWorkflow === true) await registerFilterWorkflow(ctx)
   let last: Outcome[] = []
   const log = (record: object) => {
     if (debug) {

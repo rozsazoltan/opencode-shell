@@ -56,6 +56,20 @@ Records are emitted through `console.info`. Host log routing has not been verifi
 - Complex PowerShell commands and unsupported shells are left unchanged.
 - RTK supports custom filters in a project's `.rtk/filters.toml` or the user's `~/.config/rtk/filters.toml`. Trust the relevant global and local configuration with `rtk trust`; configuration edits require trusting it again.
 
+## RTK project filter workflow
+
+The optional authoring workflow is disabled by default. Enable it in plugin options:
+
+```json
+{
+  "plugins": [{ "package": "@rozsazoltan/opencode-shell", "options": { "filterWorkflow": true } }]
+}
+```
+
+When enabled, the plugin observes completed `shell`/`bash` tool results transiently. A result at least 16,000 characters or 200 lines sets a session-local pending flag; no command, output, path, or environment value is retained or logged. On the next context request for that session, the plugin adds fixed guidance once. Normal command execution and tool results are unchanged. The `rtk-filter-authoring` skill and `/opencode-shell-filters` command also make guidance explicitly accessible.
+
+This workflow guides the agent to propose a narrow project-local `.rtk/filters.toml` edit with synthetic inline tests and run `rtk verify --require-all`. Agent edits use ordinary permission-checked tools. Verification runs inline tests and requires tests for all filters; it does not prove safety or activation. Review the exact diff, then run `rtk trust` yourself to trust that exact content. The plugin never invokes `rtk trust`, `--yes`, trust overrides, or trust/store mutations. Any subsequent edit requires fresh review and manual trust. The workflow does not create global filters or synthesize filters deterministically.
+
 ## Versions
 
 Find published versions on [npm](https://www.npmjs.com/package/@rozsazoltan/opencode-shell) and changes in [GitHub Releases](https://github.com/rozsazoltan/opencode-shell/releases). Versions follow SemVer.
