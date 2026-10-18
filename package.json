@@ -43,6 +43,7 @@
     "src/index.ts",
     "src/diagnostics.ts",
     "src/environment.ts",
+    "src/inventory.ts",
     "THIRD_PARTY_NOTICES"
   ]
 }

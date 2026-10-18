@@ -9,6 +9,7 @@ import plugin, { augment } from "./index"
 import devPlugin from "./dev/index"
 import { versionProbe } from "./diagnostics"
 import { managedEnvironment, mergeEnvironment } from "./environment"
+import { InventoryCache, parseInventory } from "./inventory"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -103,7 +104,7 @@ describe("managed environment resolution", () => {
 function context(debug: unknown = false) {
   let hook: (event: ShellCreateBefore) => Promise<void>
   let permissionHook: (event: PermissionEvaluation) => void
-  let contextHook: (event: { system: { type: string; text: string }[] }) => void
+  let contextHook: (event: { system: { type: string; text: string }[] }) => void | Promise<void>
   const commands: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }[] = []
   const synthetic = vi.fn()
   const prompt = vi.fn()
@@ -194,6 +195,77 @@ describe("installation approval", () => {
     expect(request.system[0].text).toBe("Existing instructions")
     expect(request.system[1].text).toContain("ask the user for explicit approval of the tool, source and scope")
     expect(request.system[1].text).toContain("Shell installation detection is partial")
+  })
+})
+
+describe("mise tool inventory", () => {
+  const json = JSON.stringify({
+    python: [{ version: "3.12.1", installed: true, active: true, install_path: "/secret/path" }],
+    ghost: [{ version: "1.0", installed: false, active: true }],
+  })
+  function inventoryOutput(output = json, error?: Error) {
+    calls.run.mockImplementation((file, args, options, callback) => {
+      expect(options.timeout).toBe(2000)
+      if (args[0] === "env") callback(null, '{"PATH":"/managed"}')
+      else {
+        expect(options.maxBuffer).toBe(256 * 1024)
+        expect(args).toEqual(["ls", "-c", "-i", "-J"])
+        expect(options.env.MISE_AUTO_INSTALL).toBe("0")
+        callback(error ?? null, output)
+      }
+      return { stdin: { on: vi.fn(), end: vi.fn() } }
+    })
+  }
+
+  it("sanitizes selected installed tools and excludes uninstalled entries", () => {
+    expect(parseInventory(json)).toEqual(["python@3.12.1"])
+    expect(() => parseInventory("not json")).toThrow()
+  })
+
+  it("coalesces concurrent requests and isolates project directories", async () => {
+    inventoryOutput()
+    const cache = new InventoryCache()
+    const [one, two] = await Promise.all([cache.get("/one", {}), cache.get("/one", {})])
+    expect(one).toEqual({ status: "available", tools: ["python@3.12.1"] })
+    expect(two).toEqual(one)
+    expect(calls.run).toHaveBeenCalledTimes(2)
+    await cache.get("/two", {})
+    expect(calls.run).toHaveBeenCalledTimes(4)
+  })
+
+  it("refreshes after TTL and does not serve stale data when refresh fails", async () => {
+    inventoryOutput()
+    const cache = new InventoryCache()
+    await cache.get("/project", {})
+    const now = Date.now
+    Date.now = () => now() + 61_000
+    try {
+      inventoryOutput("private raw output", Object.assign(new Error("secret"), { code: "EIO" }))
+      expect(await cache.get("/project", {})).toEqual({ status: "unavailable" })
+    } finally { Date.now = now }
+  })
+
+  it("reinjects inventory after independent context calls without leaking paths", async () => {
+    inventoryOutput()
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const first = { system: [] as { type: string; text: string }[] }
+    const second = { system: [] as { type: string; text: string }[] }
+    await fixture.contextHook()(first)
+    await fixture.contextHook()(second)
+    const inventoryText = first.system.at(-1)!.text
+    expect(second.system.at(-1)!.text).toBe(inventoryText)
+    expect(inventoryText).toContain("python@3.12.1")
+    expect(inventoryText).not.toContain("/secret/path")
+    expect(calls.run).toHaveBeenCalledTimes(2)
+  })
+
+  it("reports unavailable rather than raw errors when mise fails", async () => {
+    calls.run.mockImplementation((_file, _args, _options, callback) => {
+      callback(Object.assign(new Error("secret failure"), { code: "ENOENT" }), "secret output")
+      return { stdin: { on: vi.fn(), end: vi.fn() } }
+    })
+    expect(await new InventoryCache().get("/project", {})).toEqual({ status: "unavailable" })
   })
 })
 

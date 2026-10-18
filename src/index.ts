@@ -7,6 +7,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { hookSummary, observe, probeFailure, versionProbe, type Observe, type Outcome, type ProbeFailure } from "./diagnostics"
 import manifest from "../package.json"
 import { managedEnvironment, type Environment } from "./environment"
+import { InventoryCache } from "./inventory"
 
 type ProbeResult<T> = { status: "ok"; value: T } | { status: ProbeFailure }
 
@@ -72,8 +73,14 @@ export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> 
     event.effect = "ask"
     event.message = "Tool installation or installer download detected. Obtain explicit user approval before proceeding."
   })
-  await ctx.session.hook("context", (event) => {
+  const inventory = new InventoryCache()
+  await ctx.session.hook("context", async (event) => {
     event.system.push({ type: "text", text: "Before installing or upgrading tools, running package runners that may download tools, or downloading standalone installers, ask the user for explicit approval of the tool, source and scope. Do not treat a missing executable as permission to install it. Project dependency operations are not blanket permission to install system/global tools. Shell installation detection is partial; obfuscated commands, scripts, alternate tools and downloads may not be detected. Preserve normal host permissions and never auto-approve requests." })
+    const result = await inventory.get(ctx.location.directory, process.env)
+    const inventoryText = result.status === "available" && result.tools.length
+      ? result.tools.join(", ")
+      : result.status === "available" ? "none reported" : "unavailable; check through normal commands"
+    event.system.push({ type: "text", text: `Current selected installed mise tools at plugin location: ${inventoryText}. Inventory is evidence of selected installed tool versions, not proof of executable names or aliases. Check existing commands and aliases first (for example, python versus python3; npm/npx may be available through node, but mappings are not guaranteed). Prefer mise for approved installs. Never auto-install, auto-approve, or blindly rewrite aliases. Inventory refreshes per context request after 60 seconds; cache is instance-local and does not survive service restart. Other plugins may run context hooks in any order, and model compliance is not guaranteed.` })
   })
   let last: Outcome[] = []
   const log = (record: object) => {
