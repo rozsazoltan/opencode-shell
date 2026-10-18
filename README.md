@@ -2,6 +2,7 @@
 
 Minimal OpenCode V2 plugin that automatically applies [mise](https://github.com/jdx/mise) project environments to native shell execution and optionally rewrites supported commands with [RTK](https://github.com/rtk-ai/rtk).
 
+
 ## Install
 
 Install [mise](https://github.com/jdx/mise) and, optionally, RTK:
@@ -53,6 +54,10 @@ Records are emitted through `console.info`. Host log routing has not been verifi
 - RTK rewrites supported commands; OpenCode checks permissions against the **rewritten command**, which may need separate approval. RTK's allow decision never grants host permission; a deny result stops execution.
 - Complex PowerShell commands and unsupported shells are left unchanged.
 - RTK supports custom filters in a project's `.rtk/filters.toml` or the user's `~/.config/rtk/filters.toml`. Trust the relevant global and local configuration with `rtk trust`; configuration edits require trusting it again.
+
+## Patch recovery guidance
+
+Each model context receives guidance to reread current file lines after a patch mismatch and create a fresh, narrow patch. The plugin cannot inspect patch failures or retry them; this prompt guidance does not guarantee recovery.
 
 ## Versions
 

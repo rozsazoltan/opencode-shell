@@ -87,7 +87,7 @@ function context(debug: unknown = false) {
     shell: { hook: vi.fn((_name, callback) => { hook = callback }) },
     command: { transform: vi.fn((callback) => callback({ add: (definition: typeof command) => { command = definition } })) },
     tool: { transform: vi.fn((callback) => callback({ add: (definition: typeof tool) => { tool = definition } })) },
-    session: { synthetic, prompt },
+    session: { synthetic, prompt, hook: vi.fn(async (_name, callback) => callback({ system: [] })) },
   }
   return { ctx: ctx as unknown as Parameters<typeof plugin.setup>[0], synthetic, prompt, hook: () => hook, command: () => command, tool: () => tool }
 }

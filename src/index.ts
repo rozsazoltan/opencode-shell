@@ -57,6 +57,12 @@ export async function augment(event: ShellCreateBefore, observer?: Observe): Pro
 }
 
 export async function setup(ctx: Context, id = "opencode-shell"): Promise<void> {
+  await ctx.session.hook("context", async (event) => {
+    event.system.push({
+      type: "text",
+      text: "When a patch application fails because expected lines do not match, reread the current affected file region before editing. Build a fresh, narrow patch from that content; do not repeat the unchanged failed patch or guess a replacement location. Preserve unrelated changes and normal permission checks.",
+    })
+  })
   const debug = ctx.options.debug === true
   let last: Outcome[] = []
   const log = (record: object) => {
