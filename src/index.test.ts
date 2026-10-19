@@ -5,7 +5,7 @@ import type { PermissionEvaluation } from "@opencode/plugin/promise/permission"
 const calls = vi.hoisted(() => ({ run: vi.fn(), access: vi.fn() }))
 vi.mock("node:child_process", () => ({ execFile: calls.run }))
 vi.mock("node:fs/promises", () => ({ access: calls.access }))
-import plugin, { augment } from "./index"
+import plugin, { augment, previewRewrite } from "./index"
 import devPlugin from "./dev/index"
 import { versionProbe } from "./diagnostics"
 import { managedEnvironment, mergeEnvironment } from "./environment"
@@ -106,10 +106,10 @@ function context(debug: unknown = false) {
   let hook: (event: ShellCreateBefore) => Promise<void>
   let permissionHook: (event: PermissionEvaluation) => void
   let contextHook: (event: { system: { type: string; text: string }[] }) => void | Promise<void>
-  const commands: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue" }): Promise<void> }[] = []
+  const commands: { name: string; execute(input: { sessionID: string; delivery: "steer" | "queue"; prompt?: { text: string } }): Promise<void> }[] = []
   const synthetic = vi.fn()
   const prompt = vi.fn()
-  const tools: { name: string; input: unknown; options: unknown; execute(): Promise<{ content: string }> }[] = []
+  const tools: { name: string; input: unknown; options: unknown; execute(input?: unknown): Promise<{ content: string }> }[] = []
   const ctx = {
     options: { debug }, app: { version: "2.0.21" }, location: { directory: "/private-project" },
     shell: { hook: vi.fn((_name, callback) => { hook = callback }) },
@@ -660,5 +660,73 @@ describe("native shell augmentation", () => {
     const input = event("git status", "C:\\Windows\\powershell.exe")
     await augment(input)
     expect(input.command).toBe("git status --short")
+  })
+})
+
+describe("RTK command preview", () => {
+  it("preserves exact command as one RTK argument and never spawns supplied text", async () => {
+    const command = "git status 'quoted value' && echo $HOME"
+    outputs(undefined, { code: 3, stdout: "rtk git status 'quoted value' && echo $HOME\n" })
+    const result = await previewRewrite(command, "bash", "/plugin", { PATH: "/server" })
+    expect(calls.run.mock.calls[1][0]).toBe("rtk")
+    expect(calls.run.mock.calls[1][1]).toEqual(["rewrite", command])
+    expect(calls.run).not.toHaveBeenCalledWith(command, expect.anything(), expect.anything(), expect.anything())
+    expect(result).toMatchObject({ rewritten: true, reason: "approval_needed", proposedCommand: "rtk git status 'quoted value' && echo $HOME" })
+  })
+
+  it.each([1, 2, 7])("reports RTK exit %i without proposing execution", async (code) => {
+    outputs(undefined, { code, stdout: "proposed command" })
+    const result = await previewRewrite("git status", "bash", "/plugin", { PATH: "/server" })
+    expect(result).toMatchObject({ rewritten: false, reason: code === 2 ? "denied" : "exit_skipped", exitCode: code })
+  })
+
+  it("skips complex PowerShell input and unsupported shells", async () => {
+    expect((await previewRewrite("git status && git log", "pwsh", "/plugin", {})).reason).toBe("complex_powershell")
+    expect((await previewRewrite("git status", "cmd.exe", "/plugin", {})).reason).toBe("unsupported_shell")
+    expect(calls.run).toHaveBeenCalledTimes(1)
+    expect(calls.run.mock.calls[0][0]).toBe("mise")
+  })
+
+  it("reports missing RTK without leaking error details", async () => {
+    outputs()
+    const result = await previewRewrite("git status", "bash", "/plugin", {})
+    expect(result).toMatchObject({ rewritten: false, reason: "not_found" })
+  })
+
+  it.each([
+    [0, "applied", "rtk git status", true],
+    [3, "approval_needed", "git status", false],
+    [0, "empty_rewrite", "", false],
+  ] as const)("maps shared augment result for exit %i", async (code, _reason, stdout, changed) => {
+    outputs(undefined, { code, stdout })
+    const result = await previewRewrite("git status", "bash", "/plugin", { PATH: "/server" })
+    expect(result).toMatchObject({ rewritten: changed, reason: _reason })
+  })
+
+  it("uses augment policy for disabled and unsafe PowerShell output", async () => {
+    outputs(JSON.stringify({ RTK_DISABLED: "1" }))
+    expect((await previewRewrite("git status", "bash", "/plugin", {})).reason).toBe("disabled")
+    outputs(undefined, { code: 3, stdout: "git status | more" })
+    expect((await previewRewrite("git status", "pwsh", "/plugin", {})).reason).toBe("unsafe_powershell_rewrite")
+  })
+
+  it.each(["steer", "queue"] as const)("registers permission-controlled preview tool and serializes %s slash arguments", async (delivery) => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    const tool = fixture.tool("opencode_shell_check")
+    expect(tool.options).toEqual({ permission: "opencode_shell_check" })
+    expect(tool.input).toMatchObject({ required: ["command"], properties: { command: { minLength: 1, maxLength: 16384 } } })
+    const raw = "  git status 'quoted arg'  "
+    await fixture.command("opencode-shell-check").execute({ sessionID: "s", delivery, prompt: { text: raw } })
+    expect(fixture.prompt).toHaveBeenCalledWith(expect.objectContaining({ delivery, text: expect.stringContaining(JSON.stringify(raw)) }))
+    expect(calls.run).not.toHaveBeenCalled()
+  })
+
+  it("returns slash usage for empty prompt without probing", async () => {
+    const fixture = context()
+    await plugin.setup(fixture.ctx)
+    await fixture.command("opencode-shell-check").execute({ sessionID: "s", delivery: "steer", prompt: { text: "  " } })
+    expect(fixture.prompt).toHaveBeenCalledWith(expect.objectContaining({ text: "Usage: /opencode-shell-check <shell command>" }))
+    expect(calls.run).not.toHaveBeenCalled()
   })
 })
