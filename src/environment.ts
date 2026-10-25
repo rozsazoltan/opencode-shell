@@ -26,7 +26,7 @@ export async function managedEnvironment(cwd: string, inherited: Environment): P
   const probeEnv = mergeEnvironment(inherited, { MISE_AUTO_INSTALL: "0", MISE_EXEC_AUTO_INSTALL: "0", MISE_YES: "0" })
   const capture = (file: string): Promise<{ output: string } | { failure: ProbeFailure }> => new Promise((resolve) => {
     try {
-      const child = execFile(file, ["env", "--json"], { cwd, env: probeEnv, timeout: 2000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+      const child = execFile(file, ["env", "--json"], { cwd, env: probeEnv, timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
         resolve(error ? { failure: probeFailure(error) } : { output: stdout })
       })
       child.stdin?.on("error", () => {})

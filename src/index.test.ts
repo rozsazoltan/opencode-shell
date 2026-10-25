@@ -85,7 +85,7 @@ describe("managed environment resolution", () => {
       calls.access.mockResolvedValue(undefined)
       calls.run.mockImplementation((file, _args, options, callback) => {
         expect(options.cwd).toBe("/project")
-        expect(options.timeout).toBe(2000)
+        expect(options.timeout).toBe(5000)
         expect(options.env.MISE_AUTO_INSTALL).toBe("0")
         callback(file === "mise" ? Object.assign(new Error("absent"), { code: "ENOENT" }) : null, '{"PATH":"managed"}')
         return { stdin: { on: vi.fn(), end: vi.fn() } }
@@ -206,7 +206,7 @@ describe("mise tool inventory", () => {
   })
   function inventoryOutput(output = json, error?: Error) {
     calls.run.mockImplementation((file, args, options, callback) => {
-      expect(options.timeout).toBe(2000)
+      expect(options.timeout).toBe(args[0] === "env" ? 5000 : 2000)
       if (args[0] === "env") callback(null, '{"PATH":"/managed"}')
       else {
         expect(options.maxBuffer).toBe(256 * 1024)
@@ -499,7 +499,7 @@ describe("privacy-safe diagnostics", () => {
     outputs('{"SECRET":"env-secret","PATH":"/secret-path"}', { code: 2, stdout: "stdout-secret" })
     const input = event("command-secret")
     input.env.SECRET = "inherited-secret"
-    await expect(fixture.hook()(input)).rejects.toThrow("RTK denied")
+    await expect(fixture.hook()(input)).rejects.toThrow("RTK denied this command")
     const recorded = JSON.stringify(log.mock.calls)
     expect(recorded).toContain('denied')
     expect(recorded).toContain('applied')
@@ -514,6 +514,19 @@ describe("privacy-safe diagnostics", () => {
     expect(content).toContain("denied")
     expect(content).not.toContain("stdout-secret")
     expect(content).not.toContain("secret-path")
+  })
+
+  it("reports empty exit-code-2 deferral without exposing output", async () => {
+    const fixture = context(true)
+    const log = vi.spyOn(console, "info").mockImplementation(() => {})
+    await plugin.setup(fixture.ctx)
+    outputs("{}", { code: 2, stdout: "" })
+    await fixture.hook()(event())
+    calls.run.mockImplementation((_file, args, _options, callback) => args[0] === "env" ? callback(null, "{}") : callback(null, "mise 1.2.3"))
+    const { content } = await fixture.tool().execute()
+    expect(JSON.stringify(log.mock.calls)).toContain("permission_deferred")
+    expect(content).toContain("permission_deferred")
+    expect(content).not.toContain("private")
   })
 
   it("ignores logger failures without changing deny or rewrite semantics", async () => {
@@ -586,9 +599,28 @@ describe("native shell augmentation", () => {
     expect(input.command).toBe("git status")
   })
 
-  it("denies RTK exit code 2", async () => {
-    outputs(undefined, { code: 2, stdout: "git status --short" })
-    await expect(augment(event())).rejects.toThrow("RTK denied this command")
+  it.each(["", " ", "\t\r\n"]) ("defers exactly empty RTK exit-code-2 output: %j", async (stdout) => {
+    outputs(undefined, { code: 2, stdout })
+    const input = event()
+    const observer = vi.fn()
+    const result = augment(input, observer)
+    if (stdout === "") await expect(result).resolves.toBeUndefined()
+    else await expect(result).rejects.toThrow("RTK denied this command")
+    expect(input.command).toBe("git status")
+    expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: stdout === "" ? "permission_deferred" : "denied", code: 2 })
+    if (stdout) expect(JSON.stringify(observer.mock.calls)).not.toContain(stdout)
+  })
+
+  it("denies nonempty RTK exit-code-2 output without leaking it", async () => {
+    outputs(undefined, { code: 2, stdout: "private pipeline denial" })
+    const input = event()
+    const observer = vi.fn()
+    const error = await augment(input, observer).catch((error: Error) => error)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe("RTK denied this command")
+    expect(input.command).toBe("git status")
+    expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: "denied", code: 2 })
+    expect(JSON.stringify(observer.mock.calls)).not.toContain("private pipeline denial")
   })
 
   it("passes through unknown RTK errors", async () => {
@@ -616,10 +648,37 @@ describe("native shell augmentation", () => {
     expect(calls.run).toHaveBeenCalledTimes(1)
   })
 
-  it("leaves unknown dialects entirely unchanged", async () => {
-    const input = event("git status", "cmd.exe")
+  it.each(["cmd.exe", "C:\\Windows\\System32\\cmd.exe"]) ("applies mise only for %s", async (shell) => {
+    outputs('{"PATH":"managed"}')
+    const input = event("git status", shell)
+    const observer = vi.fn()
+    await augment(input, observer)
+    expect(input.env.PATH).toBe("managed")
+    expect(input.command).toBe("git status")
+    expect(calls.run).toHaveBeenCalledTimes(1)
+    expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: "unsupported_shell" })
+  })
+
+  it("leaves unknown dialects unchanged without probing", async () => {
+    const input = event("git status", "fish")
     await augment(input)
+    expect(input.env).toEqual(event().env)
     expect(calls.run).not.toHaveBeenCalled()
+  })
+
+  it("uses five-second environment and rewrite timeouts and catches RTK spawn throws", async () => {
+    calls.run.mockImplementation((file, _args, options, callback) => {
+      expect(options.timeout).toBe(5000)
+      if (file === "mise") callback(null, "{}")
+      else throw new Error("private spawn error")
+      return { stdin: { on: vi.fn(), end: vi.fn() } }
+    })
+    const input = event()
+    const observer = vi.fn()
+    await expect(augment(input, observer)).resolves.toBeUndefined()
+    expect(input.command).toBe("git status")
+    expect(observer).toHaveBeenCalledWith({ stage: "mise", result: "applied" })
+    expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: "failed" })
   })
 
   it("does not cache environment across commands", async () => {
@@ -656,10 +715,73 @@ describe("native shell augmentation", () => {
   })
 
   it("applies an unambiguous rewrite in PowerShell", async () => {
-    outputs(undefined, { code: 0, stdout: "git status --short\n" })
+    outputs(undefined, { code: 0, stdout: "git status --short" })
     const input = event("git status", "C:\\Windows\\powershell.exe")
     await augment(input)
     expect(input.command).toBe("git status --short")
+  })
+
+  it.each([
+    ["git -C C:\\Projects\\App status", "rtk git -C C:\\Projects\\App status"],
+    ["git diff -- 'C:\\My Projects\\App\\file name.ts'", "rtk git diff -- 'C:\\My Projects\\App\\file name.ts'"],
+    ['pnpm exec vitest run -t "check auth"', 'rtk vitest -t "check auth"'],
+    ['git diff -- "two  spaces.ts"', 'rtk git diff -- "two  spaces.ts"'],
+    ['git diff -- "C:\\dir\\"', 'rtk git diff -- "C:\\dir\\"'],
+    ["git diff -- 'literal name.ts'", "rtk git diff -- 'literal name.ts'"],
+    ["git diff\t--\t'file name.ts'", "rtk git diff\t--\t'file name.ts'"],
+  ])("preserves safe PowerShell literal rewrite: %s", async (before, after) => {
+    outputs(undefined, { code: 3, stdout: after })
+    const input = event(before, "pwsh")
+    await augment(input)
+    expect(input.command).toBe(after)
+  })
+
+  it.each([
+    ["git diff -- 'file name.ts'", "rtk git diff -- \"file name.ts\""],
+    ["git diff -- 'file name.ts'", "rtk git diff"],
+    ["git diff -- 'file name.ts' other", "rtk git diff other 'file name.ts'"],
+    ["git status", "rtk git status 'inserted'"],
+    ["git status 'quoted'", "rtk git status"],
+    ["git diff -- C:\\one", "rtk git diff -- C:\\two"],
+    ["git diff -- C:\\one", "rtk git diff"],
+    ["git diff", "rtk git diff C:\\inserted"],
+    ["git diff C:\\one -- file.ts", "rtk git diff file.ts C:\\one"],
+  ])("rejects sensitive PowerShell token changes: %s -> %s", async (before, after) => {
+    outputs(undefined, { code: 3, stdout: after })
+    const input = event(before, "pwsh")
+    const observer = vi.fn()
+    await augment(input, observer)
+    expect(input.command).toBe(before)
+    expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: "unsafe_powershell_rewrite", code: 3 })
+  })
+
+  it.each(["$env:X", "`x", "@x", "%x", "a,b", "a*b", "a~b", "a|b", "a;b", "a&b", "a>b", "a(b)", "a\nb", "a\rb", "status\n", "status\r", "status\r\n", "'a'b", "''", "\"\"", " git status"]) (
+    "rejects unsafe PowerShell input before RTK: %j", async (arg) => {
+      const command = arg === " git status" ? arg : `git ${arg}`
+      outputs("{}")
+      const observer = vi.fn()
+      await augment(event(command, "pwsh"), observer)
+      expect(calls.run).toHaveBeenCalledTimes(1)
+      expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: "complex_powershell" })
+    })
+
+  it.each(["rtk git $x", "rtk git `x", "rtk git @x", "rtk git %x", "rtk git a,b", "rtk git a*b", "rtk git a~b", "rtk git a|b", "rtk git a;b", "rtk git a&b", "rtk git a>b", "rtk git a(b)", "rtk git\nstatus", "rtk git\rstatus", "rtk git status\n", "rtk git status\r", "rtk git status\r\n", "rtk git 'a'b", "rtk git ''", "rtk git \"\""]) (
+    "rejects unsafe PowerShell RTK output: %j", async (output) => {
+      outputs(undefined, { code: 3, stdout: output })
+      const before = "git status"
+      const input = event(before, "pwsh")
+      const observer = vi.fn()
+      await augment(input, observer)
+      expect(calls.run).toHaveBeenCalledTimes(2)
+      expect(input.command).toBe(before)
+      expect(observer).toHaveBeenLastCalledWith({ stage: "rtk", result: "unsafe_powershell_rewrite", code: 3 })
+    })
+
+  it("passes through RTK exit 1 for quoted git -C path", async () => {
+    outputs(undefined, { code: 1, stdout: "" })
+    const input = event("git -C 'C:\\My Projects\\App' status", "pwsh")
+    await augment(input)
+    expect(input.command).toBe("git -C 'C:\\My Projects\\App' status")
   })
 })
 

@@ -8,7 +8,7 @@ export function probeFailure(error: { code?: unknown; killed?: boolean }): Probe
 
 export type Outcome = {
   stage: "hook" | "mise" | "rtk"
-  result: ProbeFailure | "entered" | "unsupported_shell" | "applied" | "unchanged" | "invalid_environment" | "disabled" | "complex_powershell" | "denied" | "exit_skipped" | "empty_rewrite" | "unsafe_powershell_rewrite"
+  result: ProbeFailure | "entered" | "unsupported_shell" | "applied" | "unchanged" | "invalid_environment" | "disabled" | "complex_powershell" | "denied" | "permission_deferred" | "exit_skipped" | "empty_rewrite" | "unsafe_powershell_rewrite"
   code?: number
 }
 
