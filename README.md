@@ -34,10 +34,7 @@ You do not need to activate mise in a terminal first. Missing mise or RTK is fin
 Mise must be on the OpenCode server's PATH or at `~/.local/bin/mise` (Unix) / `~\.local\bin\mise.exe` (Windows). Restart the OpenCode service after changing its PATH.
 
 - Set `RTK_DISABLED=1` to turn off rewriting.
-- PowerShell rewriting accepts only a limited native-command literal argument subset, not a full PowerShell parser. Quoted/path tokens must remain unchanged; unsupported syntax stays unchanged.
-- `cmd.exe` receives the mise environment but skips RTK; unknown shells stay unchanged without a mise probe.
-- Mise environment loading and RTK rewriting each have a separate five-second timeout. Probe failures preserve the original command.
-- RTK exit code 2 with exactly empty output defers permission decisions to OpenCode rules. Nonempty output means explicit RTK pipeline denial and blocks the command.
+- Complex PowerShell commands and unsupported shells stay unchanged.
 
 ### Custom RTK filters
 
@@ -63,6 +60,7 @@ Recognized tool installations and installer downloads require approval. Existing
 - `/opencode-shell-info` — show the loaded plugin and OpenCode versions.
 - `/opencode-shell-diagnostics` — check mise and RTK, show the report, and explain the result briefly.
 - `/opencode-shell-inventory` — show the cached tool list and the last list supplied to the agent, without refreshing it.
+- `/opencode-shell-check git status` — preview RTK rewriting without running the command. Uses the plugin's working directory and reports the chosen shell. Trusted mise hooks may run; the preview does not grant shell approval.
 
 These commands ask the agent to call the matching tool, so they use an LLM call and normal tool permissions. Diagnostics show environment loading and command rewriting, **not proof of command execution or RTK gain tracking**. The last hook and inventory reports are shared across the plugin instance, not session-specific.
 
