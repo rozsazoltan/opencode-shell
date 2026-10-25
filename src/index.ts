@@ -13,17 +13,34 @@ type ProbeResult<T> = { status: "ok"; value: T } | { status: ProbeFailure }
 
 function rewrite(command: string, cwd: string, env: Environment): Promise<ProbeResult<{ code: number; stdout: string }>> {
   return new Promise((resolve) => {
-    execFile("rtk", ["rewrite", command], { cwd, env, timeout: 2000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
-      const code = error && "code" in error && typeof error.code === "number" ? error.code : error ? undefined : 0
-      resolve(code === undefined ? { status: error ? probeFailure(error) : "failed" } : { status: "ok", value: { code, stdout } })
-    })
+    try {
+      execFile("rtk", ["rewrite", command], { cwd, env, timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+        const code = error && "code" in error && typeof error.code === "number" ? error.code : error ? undefined : 0
+        resolve(code === undefined ? { status: error ? probeFailure(error) : "failed" } : { status: "ok", value: { code, stdout } })
+      })
+    } catch {
+      resolve({ status: "failed" })
+    }
   })
 }
 
-function dialect(shell: string): "posix" | "powershell" | undefined {
+function dialect(shell: string): "posix" | "powershell" | "cmd" | undefined {
   const name = shell.split(/[\\/]/).at(-1)?.toLowerCase().replace(/\.exe$/, "")
   if (name === "pwsh" || name === "powershell") return "powershell"
+  if (name === "cmd") return "cmd"
   if (name === "bash" || name === "zsh" || name === "sh" || name === "dash") return "posix"
+}
+
+function rawTokens(command: string): string[] {
+  return command.match(/"[^"]*"|'[^']*'|[^ \t]+/g) ?? []
+}
+
+function safePowerShellSuffix(before: string, after: string): boolean {
+  const left = rawTokens(before), right = rawTokens(after)
+  let i = left.length - 1, j = right.length - 1
+  while (i >= 0 && j >= 0 && left[i] === right[j]) { i--; j-- }
+  return left.every((token, index) => !/[\\'"]/.test(token) || index > i)
+    && right.every((token, index) => !/[\\'"]/.test(token) || index > j)
 }
 
 export async function augment(event: ShellCreateBefore, observer?: Observe): Promise<void> {
@@ -36,24 +53,29 @@ export async function augment(event: ShellCreateBefore, observer?: Observe): Pro
   report({ stage: "mise", result: managed.status })
   event.env = managed.env
 
+  if (kind === "cmd") { report({ stage: "rtk", result: "unsupported_shell" }); return }
+
   if (event.env.RTK_DISABLED === "1") { report({ stage: "rtk", result: "disabled" }); return }
 
-  // RTK's parser is POSIX-oriented. Only unambiguous bare native commands are
-  // eligible in PowerShell; expressions, quoting and control flow stay intact.
-  const simplePowerShellCommand = /^[A-Za-z][A-Za-z0-9_.-]*(?: +[A-Za-z0-9_./:=,@%+-]+)* *$/
-  if (kind === "powershell" && !simplePowerShellCommand.test(event.command)) { report({ stage: "rtk", result: "complex_powershell" }); return }
+  // RTK's parser is POSIX-oriented. Allow only a narrow native-command literal subset.
+  const simplePowerShellCommand = /^[A-Za-z][A-Za-z0-9_.-]*(?:[ \t]+(?:[A-Za-z0-9_./:\\=+-]+|'[A-Za-z0-9_./:\\=+ -]+'|"[A-Za-z0-9_./:\\=+ -]+"))*[ \t]*$/
+  if (kind === "powershell" && (/[\r\n]/.test(event.command) || !simplePowerShellCommand.test(event.command))) { report({ stage: "rtk", result: "complex_powershell" }); return }
 
   const rewritten = await rewrite(event.command, event.cwd, event.env)
   if (rewritten.status !== "ok") { report({ stage: "rtk", result: rewritten.status }); return }
   const result = rewritten.value
-  if (result.code === 2) { report({ stage: "rtk", result: "denied", code: 2 }); throw new Error("RTK denied this command") }
+  if (result.code === 2) {
+    if (result.stdout.length === 0) { report({ stage: "rtk", result: "permission_deferred", code: 2 }); return }
+    report({ stage: "rtk", result: "denied", code: 2 }); throw new Error("RTK denied this command")
+  }
   if (result.code !== 0 && result.code !== 3) { report({ stage: "rtk", result: "exit_skipped", code: result.code }); return }
 
   const command = result.stdout.trimEnd()
   if (!command) { report({ stage: "rtk", result: "empty_rewrite", code: result.code }); return }
+  if (kind === "powershell" && /[\r\n]/.test(result.stdout)) { report({ stage: "rtk", result: "unsafe_powershell_rewrite", code: result.code }); return }
   // RTK output remains subject to the host's normal shell permission check.
-  // Restrict PowerShell rewrites to the same simple bare-command form.
-  if (kind === "powershell" && !simplePowerShellCommand.test(command)) { report({ stage: "rtk", result: "unsafe_powershell_rewrite", code: result.code }); return }
+  // Rewritten literal tokens must retain sensitive quoted/path arguments unchanged.
+  if (kind === "powershell" && (!simplePowerShellCommand.test(command) || !safePowerShellSuffix(event.command, command))) { report({ stage: "rtk", result: "unsafe_powershell_rewrite", code: result.code }); return }
   const unchanged = command === event.command
   event.command = command
   report({ stage: "rtk", result: unchanged ? "unchanged" : "applied", code: result.code })

@@ -34,7 +34,10 @@ You do not need to activate mise in a terminal first. Missing mise or RTK is fin
 Mise must be on the OpenCode server's PATH or at `~/.local/bin/mise` (Unix) / `~\.local\bin\mise.exe` (Windows). Restart the OpenCode service after changing its PATH.
 
 - Set `RTK_DISABLED=1` to turn off rewriting.
-- Complex PowerShell commands and unsupported shells stay unchanged.
+- PowerShell rewriting accepts only a limited native-command literal argument subset, not a full PowerShell parser. Quoted/path tokens must remain unchanged; unsupported syntax stays unchanged.
+- `cmd.exe` receives the mise environment but skips RTK; unknown shells stay unchanged without a mise probe.
+- Mise environment loading and RTK rewriting each have a separate five-second timeout. Probe failures preserve the original command.
+- RTK exit code 2 with exactly empty output defers permission decisions to OpenCode rules. Nonempty output means explicit RTK pipeline denial and blocks the command.
 
 ### Custom RTK filters
 
