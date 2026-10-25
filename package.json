@@ -1,6 +1,6 @@
 {
   "name": "@rozsazoltan/opencode-shell",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Native OpenCode V2 shell environments with mise and optional RTK command rewriting",
   "type": "module",
   "exports": {
