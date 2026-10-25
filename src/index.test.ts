@@ -802,11 +802,11 @@ describe("RTK command preview", () => {
     expect(result).toMatchObject({ rewritten: false, reason: code === 2 ? "denied" : "exit_skipped", exitCode: code })
   })
 
-  it("skips complex PowerShell input and unsupported shells", async () => {
+  it("loads mise but skips RTK for complex PowerShell and cmd", async () => {
     expect((await previewRewrite("git status && git log", "pwsh", "/plugin", {})).reason).toBe("complex_powershell")
     expect((await previewRewrite("git status", "cmd.exe", "/plugin", {})).reason).toBe("unsupported_shell")
-    expect(calls.run).toHaveBeenCalledTimes(1)
-    expect(calls.run.mock.calls[0][0]).toBe("mise")
+    expect(calls.run.mock.calls.map(([file]) => file)).toEqual(["mise", "mise"])
+    expect(calls.run.mock.calls.map(([, args]) => args)).toEqual([["env", "--json"], ["env", "--json"]])
   })
 
   it("reports missing RTK without leaking error details", async () => {
